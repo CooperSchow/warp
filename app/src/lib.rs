@@ -9,6 +9,7 @@ mod app_services;
 mod app_state;
 mod auth;
 mod autoupdate;
+mod claude_usage;
 mod banner;
 mod billing;
 mod changelog_model;
@@ -1930,6 +1931,11 @@ pub(crate) fn initialize_app(
     ctx.add_singleton_model(|_| ChangelogModel::new(server_api.clone()));
     ctx.add_singleton_model(|_| GitHubAuthNotifier::new());
     ctx.add_singleton_model(|_| NetworkStatus::new());
+    ctx.add_singleton_model(|ctx| {
+        let mut model = claude_usage::ClaudeUsageModel::new();
+        model.start_polling(ctx);
+        model
+    });
     ctx.add_singleton_model(|_| SystemStats::new());
     workspace::auto_handoff::init(ctx);
     ctx.add_singleton_model(|_| KeybindingChangedNotifier::new());

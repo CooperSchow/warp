@@ -509,6 +509,8 @@ fn enabled_features() -> HashSet<FeatureFlag> {
         FeatureFlag::PromptCacheExpiryWarning,
         #[cfg(feature = "claude_conversations")]
         FeatureFlag::ClaudeConversations,
+        #[cfg(feature = "claude_usage")]
+        FeatureFlag::ClaudeUsage,
     ]);
 
     flags

@@ -33,6 +33,10 @@ pub enum FeatureFlag {
     /// Claude Code sessions and reopens one with `claude --resume <id>` in a new tab.
     ClaudeConversations,
 
+    /// Enables the always-visible Claude usage pill in the tab bar (5-hour +
+    /// weekly limit percentages), backed by the `/api/oauth/usage` endpoint.
+    ClaudeUsage,
+
     /// Does grid storage go forwards or backwards
     SequentialStorage,
 
@@ -987,6 +991,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::WaitForEventsParentRegistration,
     FeatureFlag::McpJsonTreeView,
     FeatureFlag::ClaudeConversations,
+    FeatureFlag::ClaudeUsage,
 ];
 
 /// Features enabled for feature preview build users (e.g.: Friends of Warp).

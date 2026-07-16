@@ -21097,6 +21097,14 @@ impl Workspace {
             );
         }
 
+        if let Some(usage_pill) = self.render_usage_pill(appearance, ctx) {
+            target.add_child(
+                Container::new(usage_pill)
+                    .with_margin_left(TAB_BAR_PADDING_LEFT)
+                    .finish(),
+            );
+        }
+
         let is_online = NetworkStatus::as_ref(ctx).is_online();
 
         if !is_online {
@@ -21887,6 +21895,68 @@ impl Workspace {
         } else {
             None
         }
+    }
+
+    /// Always-visible pill showing the user's Claude usage (5-hour + weekly
+    /// limit percentages), colored by how close to a limit they are. Hidden
+    /// until the first reading arrives. Gated by `FeatureFlag::ClaudeUsage`.
+    fn render_usage_pill(
+        &self,
+        appearance: &Appearance,
+        ctx: &AppContext,
+    ) -> Option<Box<dyn Element>> {
+        if !FeatureFlag::ClaudeUsage.is_enabled() {
+            return None;
+        }
+
+        let usage = crate::claude_usage::ClaudeUsageModel::as_ref(ctx).usage()?;
+        let color = || match usage.severity {
+            crate::claude_usage::UsageSeverity::Critical => Fill::error(),
+            crate::claude_usage::UsageSeverity::Warning => Fill::warn(),
+            crate::claude_usage::UsageSeverity::Normal => Fill::success(),
+        };
+
+        let pill = Container::new(
+            Flex::row()
+                .with_child(
+                    Text::new_inline(
+                        usage.pill_label(),
+                        appearance.ui_font_family(),
+                        PILL_FONT_SIZE,
+                    )
+                    .with_color(color().into())
+                    .finish(),
+                )
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_main_axis_alignment(MainAxisAlignment::Center)
+                .finish(),
+        )
+        .with_border(Border::all(1.).with_border_color(color().into()))
+        .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
+        .with_uniform_margin(4.)
+        .with_uniform_padding(4.)
+        .finish();
+
+        let ui_builder = appearance.ui_builder().clone();
+        let tooltip_text = usage.tooltip_text();
+        let hoverable = Hoverable::new(self.mouse_states.usage_pill.clone(), |state| {
+            let mut stack = Stack::new().with_child(pill);
+            if state.is_hovered() {
+                let tool_tip = ui_builder.tool_tip(tooltip_text);
+                stack.add_positioned_overlay_child(
+                    tool_tip.build().finish(),
+                    OffsetPositioning::offset_from_parent(
+                        vec2f(0., 4.),
+                        ParentOffsetBounds::WindowByPosition,
+                        ParentAnchor::BottomMiddle,
+                        ChildAnchor::TopMiddle,
+                    ),
+                );
+            }
+            stack.finish()
+        });
+
+        Some(Align::new(hoverable.finish()).finish())
     }
 
     fn render_banner_and_active_tab(
