@@ -29,6 +29,10 @@ pub enum FeatureFlag {
     /// from GCP directly.
     FetchChannelVersionsFromWarpServer,
 
+    /// Enables the "Claude Conversations" command-palette provider that lists past
+    /// Claude Code sessions and reopens one with `claude --resume <id>` in a new tab.
+    ClaudeConversations,
+
     /// Does grid storage go forwards or backwards
     SequentialStorage,
 
@@ -982,6 +986,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::CloudRunners,
     FeatureFlag::WaitForEventsParentRegistration,
     FeatureFlag::McpJsonTreeView,
+    FeatureFlag::ClaudeConversations,
 ];
 
 /// Features enabled for feature preview build users (e.g.: Friends of Warp).

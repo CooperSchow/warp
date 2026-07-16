@@ -122,6 +122,11 @@ impl ZeroState {
             valid_filters.push(QueryFilter::Conversations);
         }
 
+        // Reopen past Claude Code sessions (newest-first, searchable).
+        if FeatureFlag::ClaudeConversations.is_enabled() {
+            valid_filters.push(QueryFilter::ClaudeConversations);
+        }
+
         valid_filters.into_iter()
     }
 }

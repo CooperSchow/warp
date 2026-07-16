@@ -563,6 +563,12 @@ pub enum WorkspaceAction {
     StartNewConversation {
         terminal_view_id: EntityId,
     },
+    /// Reopen a past Claude Code session in a new tab by running `claude --resume <id>`
+    /// in the session's working directory.
+    OpenClaudeSessionTab {
+        cwd: String,
+        resume_command: String,
+    },
     /// Jump to the terminal pane of the most recent agent toast
     JumpToLatestToast,
     /// Open a file in a new tab with a code pane
@@ -1154,6 +1160,7 @@ impl WorkspaceAction {
             | ClearTabMultiSelection
             | CancelActiveRename
             | StartNewConversation { .. }
+            | OpenClaudeSessionTab { .. }
             | UndoRevertInCodeReviewPane { .. }
             | JumpToLatestToast
             | NavigatePrevPaneOrPanel

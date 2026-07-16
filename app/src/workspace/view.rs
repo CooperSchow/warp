@@ -25271,6 +25271,31 @@ impl TypedActionView for Workspace {
                     ctx,
                 );
             }
+            OpenClaudeSessionTab {
+                cwd,
+                resume_command,
+            } => {
+                let working_dir = if cwd.is_empty() {
+                    dirs::home_dir().unwrap_or_default()
+                } else {
+                    std::path::PathBuf::from(cwd)
+                };
+                let layout = crate::launch_configs::launch_config::PaneTemplateType::PaneTemplate {
+                    cwd: working_dir,
+                    commands: vec![crate::launch_configs::launch_config::CommandTemplate::from(
+                        resume_command.as_str(),
+                    )],
+                    is_focused: Some(true),
+                    pane_mode: crate::launch_configs::launch_config::PaneMode::Terminal,
+                    shell: None,
+                };
+                self.add_tab_with_pane_layout(
+                    PanesLayout::Template(layout),
+                    Arc::new(HashMap::new()),
+                    None,
+                    ctx,
+                );
+            }
             JumpToLatestToast => {
                 if FeatureFlag::HOANotifications.is_enabled() {
                     let newest = AgentNotificationsModel::as_ref(ctx)

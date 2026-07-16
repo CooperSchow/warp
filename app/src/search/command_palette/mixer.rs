@@ -81,6 +81,11 @@ pub enum CommandPaletteItemAction {
     },
     /// Start a new AI conversation
     NewConversation,
+    /// Reopen a past Claude Code session (`claude --resume <id>`) in a new tab.
+    OpenClaudeSession {
+        cwd: String,
+        resume_command: String,
+    },
     /// No-op action (used for non-interactable separator items that don't do anything on click).
     NoOp,
 }
@@ -146,6 +151,7 @@ impl CommandPaletteItemAction {
                 ItemSummary::Project { path: path.clone() }
             }
             CommandPaletteItemAction::NewConversation => ItemSummary::NewConversation,
+            CommandPaletteItemAction::OpenClaudeSession { .. } => ItemSummary::NoOp,
             CommandPaletteItemAction::NoOp => ItemSummary::NoOp,
         }
     }

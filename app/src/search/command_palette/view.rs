@@ -993,6 +993,15 @@ impl View {
                     });
                 }
             }
+            CommandPaletteItemAction::OpenClaudeSession {
+                cwd,
+                resume_command,
+            } => {
+                ctx.dispatch_typed_action(&WorkspaceAction::OpenClaudeSessionTab {
+                    cwd,
+                    resume_command,
+                });
+            }
             CommandPaletteItemAction::NoOp => {
                 // No-op action (used for non-interactable separator items that don't do anything on click).
             }

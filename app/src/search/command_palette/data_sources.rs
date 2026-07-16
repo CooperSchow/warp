@@ -6,7 +6,7 @@ use warp_core::features::FeatureFlag;
 use warpui::keymap::BindingId;
 use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity};
 
-use super::{conversations, warp_drive};
+use super::{claude_conversations, conversations, warp_drive};
 use crate::drive::settings::WarpDriveSettings;
 use crate::search::action::CommandBindingDataSource;
 use crate::search::binding_source::BindingSource;
@@ -29,6 +29,7 @@ pub struct DataSourceStore {
     launch_config_data_source: ModelHandle<launch_config::DataSource>,
     new_session_data_source: Option<ModelHandle<NewSessionDataSource>>,
     all_conversation_data_source: ModelHandle<conversations::DataSource>,
+    claude_conversations_data_source: ModelHandle<claude_conversations::DataSource>,
     repo_data_source: ModelHandle<RepoDataSource>,
     tabs_data_source: Option<ModelHandle<tabs::DataSource>>,
 }
@@ -56,6 +57,9 @@ impl DataSourceStore {
         let all_conversation_data_source: ModelHandle<conversations::DataSource> =
             ctx.add_model(|_| conversations::DataSource::new());
 
+        let claude_conversations_data_source =
+            ctx.add_model(claude_conversations::DataSource::new);
+
         let repo_data_source = ctx.add_model(|_| RepoDataSource::new());
 
         Self {
@@ -65,6 +69,7 @@ impl DataSourceStore {
             launch_config_data_source,
             new_session_data_source,
             all_conversation_data_source,
+            claude_conversations_data_source,
             repo_data_source,
             tabs_data_source: None,
         }
@@ -146,6 +151,14 @@ impl DataSourceStore {
                 mixer.add_sync_source(
                     self.all_conversation_data_source.clone(),
                     HashSet::from([QueryFilter::Conversations]),
+                );
+            }
+
+            // Reopen past Claude Code sessions (`claude --resume <id>`).
+            if FeatureFlag::ClaudeConversations.is_enabled() {
+                mixer.add_sync_source(
+                    self.claude_conversations_data_source.clone(),
+                    HashSet::from([QueryFilter::ClaudeConversations]),
                 );
             }
 
