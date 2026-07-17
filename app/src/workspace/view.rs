@@ -21910,10 +21910,13 @@ impl Workspace {
         }
 
         let usage = crate::claude_usage::ClaudeUsageModel::as_ref(ctx).usage()?;
+        // Stay neutral (matching the tab-bar text) when comfortably under a limit;
+        // only warm to amber/red as usage climbs, so the pill reads as ambient
+        // information rather than an always-on alert.
         let color = || match usage.severity {
             crate::claude_usage::UsageSeverity::Critical => Fill::error(),
             crate::claude_usage::UsageSeverity::Warning => Fill::warn(),
-            crate::claude_usage::UsageSeverity::Normal => Fill::success(),
+            crate::claude_usage::UsageSeverity::Normal => appearance.theme().foreground(),
         };
 
         let pill = Container::new(
@@ -21933,7 +21936,8 @@ impl Workspace {
         .with_border(Border::all(1.).with_border_color(color().into()))
         .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
         .with_uniform_margin(4.)
-        .with_uniform_padding(4.)
+        .with_horizontal_padding(8.)
+        .with_vertical_padding(3.)
         .finish();
 
         let ui_builder = appearance.ui_builder().clone();
