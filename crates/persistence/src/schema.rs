@@ -417,6 +417,7 @@ diesel::table! {
         active_profile_id -> Nullable<Text>,
         conversation_ids -> Nullable<Text>,
         active_conversation_id -> Nullable<Text>,
+        claude_session_id -> Nullable<Text>,
     }
 }
 

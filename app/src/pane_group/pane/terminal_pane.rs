@@ -58,7 +58,7 @@ use crate::terminal::shared_session::SharedSessionSource;
 use crate::terminal::shared_session::{join_link, SharedSessionStatus};
 use crate::terminal::view::ambient_agent::should_disable_snapshot;
 use crate::terminal::view::Event;
-use crate::terminal::{TerminalManager, TerminalView};
+use crate::terminal::{CLIAgent, TerminalManager, TerminalView};
 use crate::view_components::ToastFlavor;
 use crate::workspace::sync_inputs::SyncedInputState;
 use crate::workspace::{PaneViewLocator, WorkspaceRegistry};
@@ -516,6 +516,7 @@ impl PaneContent for TerminalPane {
                 active_profile_id: None,
                 conversation_ids_to_restore: vec![],
                 active_conversation_id: None,
+                claude_session_id: None,
             })
         } else if let Some(task_id) = view
             .ambient_agent_view_model()
@@ -546,6 +547,7 @@ impl PaneContent for TerminalPane {
                     active_profile_id: None,
                     conversation_ids_to_restore: vec![],
                     active_conversation_id: None,
+                    claude_session_id: None,
                 })
             }
         } else {
@@ -576,6 +578,13 @@ impl PaneContent for TerminalPane {
                         .active_conversation_id()
                 });
 
+            // The Claude Code session (if any) live in this pane, so it can be
+            // resumed with `claude --resume <id>` when the tab is restored.
+            let claude_session_id = CLIAgentSessionsModel::as_ref(app)
+                .session(self.terminal_view(app).id())
+                .filter(|session| matches!(session.agent, CLIAgent::Claude))
+                .and_then(|session| session.session_context.session_id.clone());
+
             LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: self.uuid.clone(),
                 cwd: view.pwd_if_local(app),
@@ -587,6 +596,7 @@ impl PaneContent for TerminalPane {
                 active_profile_id,
                 conversation_ids_to_restore,
                 active_conversation_id,
+                claude_session_id,
             })
         }
     }

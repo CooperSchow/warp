@@ -1686,6 +1686,17 @@ impl PaneGroup {
 
                 let terminal_view_id = terminal_view.id();
 
+                // Resume a Claude Code session that was live in this pane at save
+                // time, so restored tabs reopen into their conversation instead of a
+                // blank shell. Runs once the restored shell finishes bootstrapping,
+                // like a launch-config setup command.
+                if let Some(claude_id) = terminal_snapshot.claude_session_id.as_deref() {
+                    let resume_command = format!("claude --resume {claude_id}");
+                    terminal_view.update(ctx, |terminal, ctx| {
+                        terminal.set_pending_command_queue(vec![resume_command], ctx);
+                    });
+                }
+
                 let pane_data = TerminalPane::new(
                     uuid.0,
                     terminal_manager,
@@ -2158,6 +2169,7 @@ impl PaneGroup {
                             active_profile_id: None,
                             conversation_ids_to_restore: Vec::new(),
                             active_conversation_id: None,
+                            claude_session_id: None,
                         })
                     }
                 };
