@@ -155,25 +155,48 @@ impl SingletonEntity for ClaudeUsageModel {}
 
 /// Read Claude Code's OAuth access token from the macOS Keychain.
 async fn read_token() -> Option<String> {
-    let out = command::r#async::Command::new("security")
+    let out = match command::r#async::Command::new("/usr/bin/security")
         .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
         .output()
         .await
-        .ok()?;
+    {
+        Ok(out) => out,
+        Err(e) => {
+            log::warn!("[claude_usage] security spawn failed: {e}");
+            return None;
+        }
+    };
     if !out.status.success() {
+        log::warn!(
+            "[claude_usage] security exit={:?} stderr={}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
         return None;
     }
-    let json: Value = serde_json::from_slice(&out.stdout).ok()?;
-    json.get("claudeAiOauth")
+    let json: Value = match serde_json::from_slice(&out.stdout) {
+        Ok(json) => json,
+        Err(e) => {
+            log::warn!("[claude_usage] keychain json parse failed: {e}");
+            return None;
+        }
+    };
+    let token = json
+        .get("claudeAiOauth")
         .and_then(|o| o.get("accessToken"))
         .and_then(Value::as_str)
-        .map(str::to_owned)
+        .map(str::to_owned);
+    log::warn!(
+        "[claude_usage] token read: {}",
+        if token.is_some() { "OK" } else { "missing accessToken" }
+    );
+    token
 }
 
 async fn fetch_usage() -> Option<ClaudeUsage> {
     let token = read_token().await?;
     let auth = format!("Authorization: Bearer {token}");
-    let out = command::r#async::Command::new("curl")
+    let out = match command::r#async::Command::new("/usr/bin/curl")
         .args([
             "-s",
             "-H",
@@ -188,8 +211,24 @@ async fn fetch_usage() -> Option<ClaudeUsage> {
         ])
         .output()
         .await
-        .ok()?;
-    parse_usage(&out.stdout)
+    {
+        Ok(out) => out,
+        Err(e) => {
+            log::warn!("[claude_usage] curl spawn failed: {e}");
+            return None;
+        }
+    };
+    log::warn!(
+        "[claude_usage] curl exit={:?} body_len={}",
+        out.status.code(),
+        out.stdout.len()
+    );
+    let parsed = parse_usage(&out.stdout);
+    log::warn!(
+        "[claude_usage] parse: {}",
+        if parsed.is_some() { "OK" } else { "None" }
+    );
+    parsed
 }
 
 fn parse_usage(body: &[u8]) -> Option<ClaudeUsage> {

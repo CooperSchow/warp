@@ -61,6 +61,7 @@ use crate::search::command_search::settings::{
 };
 use crate::server::telemetry::TelemetryEvent;
 use crate::settings::ai::AISettings;
+use crate::settings::{ClaudeConversationsEnabled, ClaudeSettings, ClaudeUsagePillEnabled};
 use crate::settings::native_preference::{NativePreferenceSettings, UserNativePreference};
 use crate::settings::{
     AISettingsChangedEvent, AliasExpansionEnabled, AliasExpansionSettings, AppEditorSettings,
@@ -728,6 +729,8 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
 pub enum FeaturesPageAction {
     ToggleCopyOnSelect,
     ToggleAsyncFind,
+    ToggleClaudeConversations,
+    ToggleClaudeUsagePill,
     ToggleNotifications,
     ToggleRestoreSession,
     ToggleAutocompleteSymbols,
@@ -1341,6 +1344,14 @@ impl FeaturesPageAction {
             Self::ToggleAsyncFind => TelemetryEvent::FeaturesPageAction {
                 action: "ToggleAsyncFind".to_string(),
                 value: to_string(*TerminalSettings::as_ref(ctx).async_find_enabled),
+            },
+            Self::ToggleClaudeConversations => TelemetryEvent::FeaturesPageAction {
+                action: "ToggleClaudeConversations".to_string(),
+                value: to_string(*ClaudeSettings::as_ref(ctx).claude_conversations_enabled),
+            },
+            Self::ToggleClaudeUsagePill => TelemetryEvent::FeaturesPageAction {
+                action: "ToggleClaudeUsagePill".to_string(),
+                value: to_string(*ClaudeSettings::as_ref(ctx).claude_usage_pill_enabled),
             },
         }
     }
@@ -2124,6 +2135,16 @@ impl TypedActionView for FeaturesPageView {
                         .toggle_and_save_value(ctx));
                 });
             }
+            ToggleClaudeConversations => {
+                ClaudeSettings::handle(ctx).update(ctx, |s, ctx| {
+                    report_if_error!(s.claude_conversations_enabled.toggle_and_save_value(ctx));
+                });
+            }
+            ToggleClaudeUsagePill => {
+                ClaudeSettings::handle(ctx).update(ctx, |s, ctx| {
+                    report_if_error!(s.claude_usage_pill_enabled.toggle_and_save_value(ctx));
+                });
+            }
         }
 
         send_telemetry_from_ctx!(action.telemetry_event(ctx), ctx);
@@ -2752,6 +2773,8 @@ impl FeaturesPageView {
         // is off. Channels with the flag on force the feature on and hide the toggle
         // entirely; see `TerminalSettings::is_async_find_enabled`.
         general_widgets.push(Box::new(AsyncFindWidget::default()));
+        general_widgets.push(Box::new(ClaudeConversationsWidget::default()));
+        general_widgets.push(Box::new(ClaudeUsagePillWidget::default()));
 
         let app_editor_settings = AppEditorSettings::as_ref(ctx);
 
@@ -7711,6 +7734,130 @@ impl SettingsWidget for AsyncFindWidget {
             appearance,
             Some(
                 "Use an improved implementation of find to keep the UI responsive while searching for matches on large outputs."
+                    .into(),
+            ),
+        )
+    }
+}
+
+#[derive(Default)]
+struct ClaudeConversationsWidget {
+    switch_state: SwitchStateHandle,
+}
+
+impl SettingsWidget for ClaudeConversationsWidget {
+    type View = FeaturesPageView;
+
+    fn search_terms(&self) -> &str {
+        "claude conversations sessions resume command palette history"
+    }
+
+    fn should_render(&self, _app: &AppContext) -> bool {
+        FeatureFlag::ClaudeConversations.is_enabled()
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let ui_builder = appearance.ui_builder();
+
+        let label = render_body_item_label::<FeaturesPageAction>(
+            "Claude conversations".into(),
+            None,
+            None,
+            LocalOnlyIconState::for_setting(
+                ClaudeConversationsEnabled::storage_key(),
+                ClaudeConversationsEnabled::sync_to_cloud(),
+                &mut view
+                    .button_mouse_states
+                    .local_only_icon_tooltip_states
+                    .borrow_mut(),
+                app,
+            ),
+            ToggleState::Enabled,
+            appearance,
+        );
+
+        let switch = ui_builder
+            .switch(self.switch_state.clone())
+            .check(*ClaudeSettings::as_ref(app).claude_conversations_enabled)
+            .build()
+            .on_click(move |ctx, _, _| {
+                ctx.dispatch_typed_action(FeaturesPageAction::ToggleClaudeConversations);
+            })
+            .finish();
+
+        build_toggle_element(
+            label,
+            switch,
+            appearance,
+            Some(
+                "List past Claude Code sessions in the command palette and reopen one with claude --resume."
+                    .into(),
+            ),
+        )
+    }
+}
+
+#[derive(Default)]
+struct ClaudeUsagePillWidget {
+    switch_state: SwitchStateHandle,
+}
+
+impl SettingsWidget for ClaudeUsagePillWidget {
+    type View = FeaturesPageView;
+
+    fn search_terms(&self) -> &str {
+        "claude usage pill limits 5-hour weekly tab bar"
+    }
+
+    fn should_render(&self, _app: &AppContext) -> bool {
+        FeatureFlag::ClaudeUsage.is_enabled()
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let ui_builder = appearance.ui_builder();
+
+        let label = render_body_item_label::<FeaturesPageAction>(
+            "Claude usage pill".into(),
+            None,
+            None,
+            LocalOnlyIconState::for_setting(
+                ClaudeUsagePillEnabled::storage_key(),
+                ClaudeUsagePillEnabled::sync_to_cloud(),
+                &mut view
+                    .button_mouse_states
+                    .local_only_icon_tooltip_states
+                    .borrow_mut(),
+                app,
+            ),
+            ToggleState::Enabled,
+            appearance,
+        );
+
+        let switch = ui_builder
+            .switch(self.switch_state.clone())
+            .check(*ClaudeSettings::as_ref(app).claude_usage_pill_enabled)
+            .build()
+            .on_click(move |ctx, _, _| {
+                ctx.dispatch_typed_action(FeaturesPageAction::ToggleClaudeUsagePill);
+            })
+            .finish();
+
+        build_toggle_element(
+            label,
+            switch,
+            appearance,
+            Some(
+                "Show your Claude 5-hour and weekly usage limits as a pill in the tab bar."
                     .into(),
             ),
         )

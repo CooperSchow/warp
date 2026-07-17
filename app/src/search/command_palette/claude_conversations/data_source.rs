@@ -44,6 +44,15 @@ impl SyncDataSource for DataSource {
             .filter(|(_, session)| {
                 needle.is_empty()
                     || session.display_title().to_lowercase().contains(&needle)
+                    // Also match the first user prompt so content keywords
+                    // (client names, etc.) find a session even when its title
+                    // is generic.
+                    || session
+                        .first_prompt
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains(&needle)
                     || session
                         .cwd
                         .as_deref()

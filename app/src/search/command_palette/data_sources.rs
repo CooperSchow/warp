@@ -155,7 +155,7 @@ impl DataSourceStore {
             }
 
             // Reopen past Claude Code sessions (`claude --resume <id>`).
-            if FeatureFlag::ClaudeConversations.is_enabled() {
+            if crate::settings::ClaudeSettings::as_ref(ctx).is_claude_conversations_enabled() {
                 mixer.add_sync_source(
                     self.claude_conversations_data_source.clone(),
                     HashSet::from([QueryFilter::ClaudeConversations]),

@@ -33,6 +33,8 @@ pub struct ClaudeSession {
     pub first_prompt: Option<String>,
     /// Most recent activity timestamp (ISO-8601; sorts lexically).
     pub last_activity: Option<String>,
+    /// Earliest activity timestamp (ISO-8601) — when the session began.
+    pub first_activity: Option<String>,
     /// Count of the human's own (non-sidechain) user + assistant turns. Sidechain
     /// (subagent/Task) turns are excluded so a session's weight reflects the real
     /// conversation rather than the subagents it spawned.
@@ -64,6 +66,22 @@ impl ClaudeSession {
             .unwrap_or(&raw)
             .to_string()
     }
+
+    /// Compact "MM-DD HH:MM" of the most recent activity, for the list.
+    pub fn last_activity_label(&self) -> Option<String> {
+        short_stamp(self.last_activity.as_deref())
+    }
+
+    /// Compact "MM-DD HH:MM" of when the session began.
+    pub fn first_activity_label(&self) -> Option<String> {
+        short_stamp(self.first_activity.as_deref())
+    }
+}
+
+/// Turn an ISO-8601 timestamp like `2026-07-16T02:43:…` into a compact
+/// `07-16 02:43`. Returns `None` if the string is too short to slice.
+fn short_stamp(iso: Option<&str>) -> Option<String> {
+    iso.and_then(|s| s.get(5..16)).map(|d| d.replace('T', " "))
 }
 
 /// Extract plain text from a `message.content` field (string or content-block array).
@@ -104,6 +122,9 @@ fn ingest_line(session: &mut ClaudeSession, line: &str) {
     if let Some(ts) = obj.get("timestamp").and_then(Value::as_str) {
         if session.last_activity.as_deref().is_none_or(|cur| ts > cur) {
             session.last_activity = Some(ts.to_string());
+        }
+        if session.first_activity.as_deref().is_none_or(|cur| ts < cur) {
+            session.first_activity = Some(ts.to_string());
         }
     }
     if ty == "ai-title" {
@@ -228,6 +249,11 @@ fn merge_session(into: &mut ClaudeSession, other: ClaudeSession) {
     }
     if other.last_activity > into.last_activity {
         into.last_activity = other.last_activity;
+    }
+    match (&into.first_activity, &other.first_activity) {
+        (None, _) => into.first_activity = other.first_activity,
+        (Some(cur), Some(o)) if o < cur => into.first_activity = other.first_activity,
+        _ => {}
     }
 }
 

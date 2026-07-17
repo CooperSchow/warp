@@ -55,11 +55,17 @@ impl crate::search::item::SearchItem for ClaudeSessionItem {
         .with_color(highlight_state.sub_text_fill(appearance).into_solid())
         .with_style(Properties::default().weight(Weight::Bold));
 
-        let subtitle_text = self
+        let location = self
             .session
             .cwd
             .clone()
             .unwrap_or_else(|| self.session.project_label());
+        // Prefix the working directory with the last-activity date, e.g.
+        // "07-16 02:43 · /Users/me/project".
+        let subtitle_text = match self.session.last_activity_label() {
+            Some(when) => format!("{when} · {location}"),
+            None => location,
+        };
         let subtitle = Text::new_inline(
             subtitle_text,
             appearance.ui_font_family(),

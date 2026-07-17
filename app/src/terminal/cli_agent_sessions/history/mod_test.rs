@@ -21,6 +21,9 @@ fn captures_title_cwd_models_and_counts_human_turns() {
     assert_eq!(session.message_count, 2);
     assert_eq!(session.cwd.as_deref(), Some("/home/me/proj"));
     assert_eq!(session.last_activity.as_deref(), Some("2026-07-15T01:00:05Z"));
+    assert_eq!(session.first_activity.as_deref(), Some("2026-07-15T01:00:00Z"));
+    assert_eq!(session.last_activity_label(), Some("07-15 01:00".to_string()));
+    assert_eq!(session.first_activity_label(), Some("07-15 01:00".to_string()));
     assert!(session.models.contains("claude-opus-4-8"));
     assert_eq!(session.project_label(), "proj");
     assert_eq!(session.resume_command(), "claude --resume sess-1");

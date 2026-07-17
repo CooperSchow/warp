@@ -21905,7 +21905,7 @@ impl Workspace {
         appearance: &Appearance,
         ctx: &AppContext,
     ) -> Option<Box<dyn Element>> {
-        if !FeatureFlag::ClaudeUsage.is_enabled() {
+        if !crate::settings::ClaudeSettings::as_ref(ctx).is_claude_usage_pill_enabled() {
             return None;
         }
 
@@ -21927,8 +21927,7 @@ impl Workspace {
                     .with_color(color().into())
                     .finish(),
                 )
-                .with_main_axis_size(MainAxisSize::Max)
-                .with_main_axis_alignment(MainAxisAlignment::Center)
+                .with_main_axis_size(MainAxisSize::Min)
                 .finish(),
         )
         .with_border(Border::all(1.).with_border_color(color().into()))

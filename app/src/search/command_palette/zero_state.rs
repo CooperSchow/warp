@@ -123,7 +123,7 @@ impl ZeroState {
         }
 
         // Reopen past Claude Code sessions (newest-first, searchable).
-        if FeatureFlag::ClaudeConversations.is_enabled() {
+        if crate::settings::ClaudeSettings::as_ref(app).is_claude_conversations_enabled() {
             valid_filters.push(QueryFilter::ClaudeConversations);
         }
 
