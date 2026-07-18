@@ -182,6 +182,28 @@ pub fn claude_projects_dir() -> Option<PathBuf> {
     Some(base.join("projects"))
 }
 
+/// True if a resumable Claude session transcript named `<id>.jsonl` exists under
+/// any project directory in the Claude store. Used to guard `claude --resume <id>`
+/// on tab restore so a stale, deleted, or never-persisted ("phantom") session id
+/// doesn't error the restored shell with "No conversation found".
+pub fn session_file_exists(id: &str) -> bool {
+    // Only accept a bare session id, so we never build a path that escapes the
+    // projects directory (the id comes from persisted snapshot state).
+    if id.is_empty() || id.contains('/') || id.contains(std::path::MAIN_SEPARATOR) {
+        return false;
+    }
+    let Some(root) = claude_projects_dir() else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return false;
+    };
+    let file_name = format!("{id}.jsonl");
+    entries
+        .flatten()
+        .any(|entry| entry.path().join(&file_name).is_file())
+}
+
 /// Read every resume-able Claude Code session under `projects_root`, newest first.
 ///
 /// Skips `agent-*` files (subagent Task transcripts, not top-level resumable

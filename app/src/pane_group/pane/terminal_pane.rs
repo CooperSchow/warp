@@ -580,10 +580,23 @@ impl PaneContent for TerminalPane {
 
             // The Claude Code session (if any) live in this pane, so it can be
             // resumed with `claude --resume <id>` when the tab is restored.
+            // Prefer the transcript file's stem — that is the exact id Claude
+            // resolves on `--resume`, and it only exists once the session has
+            // actually been persisted to disk — falling back to the reported
+            // session id (validated for existence at restore time).
             let claude_session_id = CLIAgentSessionsModel::as_ref(app)
                 .session(self.terminal_view(app).id())
                 .filter(|session| matches!(session.agent, CLIAgent::Claude))
-                .and_then(|session| session.session_context.session_id.clone());
+                .and_then(|session| {
+                    let context = &session.session_context;
+                    context
+                        .transcript_path
+                        .as_deref()
+                        .map(std::path::Path::new)
+                        .and_then(|path| path.file_stem())
+                        .map(|stem| stem.to_string_lossy().into_owned())
+                        .or_else(|| context.session_id.clone())
+                });
 
             LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: self.uuid.clone(),

@@ -41,6 +41,12 @@ pub struct CLIAgentSessionContext {
     pub cwd: Option<String>,
     pub project: Option<String>,
     pub session_id: Option<String>,
+    /// Path to the on-disk transcript (`~/.claude/projects/**/<id>.jsonl`) as
+    /// reported by the plugin. Its file stem is the exact, persisted id Claude
+    /// resolves on `--resume`, so it is preferred over `session_id` (which the
+    /// plugin can announce before any transcript is written) when capturing a
+    /// resumable id for tab restore.
+    pub transcript_path: Option<String>,
     pub tool_name: Option<String>,
     pub tool_input_preview: Option<String>,
     pub summary: Option<String>,
@@ -187,6 +193,13 @@ impl CLIAgentSession {
             .session_id
             .clone()
             .or(self.session_context.session_id.take());
+        // Latch the transcript path from any event that reports one; it's the
+        // authoritative pointer to the persisted, resumable session file.
+        self.session_context.transcript_path = event
+            .payload
+            .transcript_path
+            .clone()
+            .or(self.session_context.transcript_path.take());
 
         let new_status = match &event.event {
             CLIAgentEventType::PromptSubmit => {

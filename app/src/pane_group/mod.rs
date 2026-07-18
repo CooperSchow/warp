@@ -1690,10 +1690,21 @@ impl PaneGroup {
                 // time, so restored tabs reopen into their conversation instead of a
                 // blank shell. Runs once the restored shell finishes bootstrapping,
                 // like a launch-config setup command.
+                //
+                // Only `--resume` when the session transcript still exists on disk;
+                // a stale, deleted, or never-persisted ("phantom") id would error
+                // the shell with "No conversation found". In that case fall back to
+                // launching Claude fresh, since this was a Claude tab either way.
                 if let Some(claude_id) = terminal_snapshot.claude_session_id.as_deref() {
-                    let resume_command = format!("claude --resume {claude_id}");
+                    let command = if crate::terminal::cli_agent_sessions::history::session_file_exists(
+                        claude_id,
+                    ) {
+                        format!("claude --resume {claude_id}")
+                    } else {
+                        "claude".to_string()
+                    };
                     terminal_view.update(ctx, |terminal, ctx| {
-                        terminal.set_pending_command_queue(vec![resume_command], ctx);
+                        terminal.set_pending_command_queue(vec![command], ctx);
                     });
                 }
 
