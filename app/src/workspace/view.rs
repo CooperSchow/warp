@@ -355,7 +355,8 @@ use crate::settings_view::{flags, SettingsSection, SettingsView, SettingsViewEve
 use crate::shell_indicator::ShellIndicatorType;
 use crate::tab::{
     color_picker_menu_items, tab_position_id, uses_vertical_tabs, ColorPickerTarget,
-    NewSessionMenuItem, PaneNameMenuTarget, SelectedTabColor, TabBarState, TabComponent, TabData,
+    NewSessionMenuItem, PaneNameMenuTarget, SelectedTabColor, TabColor, TabBarState, TabComponent,
+    TabData,
     TabTelemetryAction, COMPACT_TAB_WIDTH_THRESHOLD, MOVE_TO_GROUP_LABEL, TAB_BAR_BORDER_HEIGHT,
     TAB_INDICATOR_HEIGHT, TAB_PIN_INDICATOR_ICON_SIZE, TAB_PIN_VANISH_THRESHOLD,
 };
@@ -3903,7 +3904,7 @@ impl Workspace {
                                 TabGroup {
                                     id: group_snapshot.id,
                                     name: group_snapshot.name.clone(),
-                                    color: group_snapshot.color,
+                                    color: group_snapshot.color.clone(),
                                     collapsed: group_snapshot.collapsed,
                                     draggable_state: Default::default(),
                                     // Only restore pinned state when the
@@ -3930,7 +3931,7 @@ impl Workspace {
                         );
                         self.tabs[tab_index].default_directory_color =
                             saved_tab.default_directory_color;
-                        self.tabs[tab_index].selected_color = saved_tab.selected_color;
+                        self.tabs[tab_index].selected_color = saved_tab.selected_color.clone();
                         // Only restore pinned state when the Pinned Tabs
                         // feature is enabled.
                         if FeatureFlag::PinnedTabs.is_enabled() {
@@ -5179,7 +5180,7 @@ impl Workspace {
                     subtitle,
                     window_id,
                     tab_index: tab_index + 1,
-                    color: tab.color(),
+                    color: tab.ansi_color(),
                 })
             })
             .collect()
@@ -5189,9 +5190,10 @@ impl Workspace {
         self.tabs.iter().map(|s| &s.pane_group)
     }
 
-    /// Get the tab color for a given tab index.
+    /// Get the tab color for a given tab index (ANSI token only; custom hex
+    /// colors resolve to `None` here).
     pub fn get_tab_color(&self, index: usize) -> Option<AnsiColorIdentifier> {
-        self.tabs.get(index).and_then(|tab| tab.color())
+        self.tabs.get(index).and_then(|tab| tab.ansi_color())
     }
 
     /// Finds the pane containing a terminal viewing the given ambient agent conversation,
@@ -5539,10 +5541,14 @@ impl Workspace {
         if self.tabs[index].selected_color == color {
             return;
         }
+        let is_set = matches!(
+            color,
+            SelectedTabColor::Color(_) | SelectedTabColor::Custom(_)
+        );
         self.tabs[index].selected_color = color;
         send_telemetry_from_ctx!(
             TelemetryEvent::TabOperations {
-                action: if matches!(color, SelectedTabColor::Color(_)) {
+                action: if is_set {
                     TabTelemetryAction::SetColor
                 } else {
                     TabTelemetryAction::ResetColor
@@ -5556,7 +5562,7 @@ impl Workspace {
     pub fn toggle_tab_color(
         &mut self,
         index: usize,
-        color: AnsiColorIdentifier,
+        color: TabColor,
         ctx: &mut ViewContext<Self>,
     ) {
         if self.tabs.get(index).is_none() {
@@ -5566,14 +5572,14 @@ impl Workspace {
             );
             return;
         }
-        let next = if self.tabs[index].color() == Some(color) {
+        let next = if self.tabs[index].color() == Some(color.clone()) {
             if FeatureFlag::DirectoryTabColors.is_enabled() {
                 SelectedTabColor::Cleared
             } else {
                 SelectedTabColor::Unset
             }
         } else {
-            SelectedTabColor::Color(color)
+            color.as_selected()
         };
         self.set_tab_color(index, next, ctx);
     }
@@ -5605,17 +5611,17 @@ impl Workspace {
     fn toggle_tab_group_color(
         &mut self,
         group_id: TabGroupId,
-        color: AnsiColorIdentifier,
+        color: TabColor,
         ctx: &mut ViewContext<Self>,
     ) {
         let current = self
             .tab_groups
             .get(&group_id)
             .and_then(|g| g.color.resolve(None));
-        let next = if current == Some(color) {
+        let next = if current == Some(color.clone()) {
             SelectedTabColor::Cleared
         } else {
-            SelectedTabColor::Color(color)
+            color.as_selected()
         };
         self.set_tab_group_color(group_id, next, ctx);
     }
@@ -6975,7 +6981,7 @@ impl Workspace {
         let tab = &self.tabs[tab_index];
         let snapshot = tab.pane_group.as_ref(ctx).snapshot(ctx);
         let custom_title = tab.pane_group.as_ref(ctx).custom_title(ctx);
-        let color = tab.color();
+        let color = tab.ansi_color();
         let config = tab_config_from_pane_snapshot(&snapshot, custom_title, color);
 
         let dir = tab_configs_dir();
@@ -11444,7 +11450,7 @@ impl Workspace {
                     selected_color: self
                         .tabs
                         .get(tab_index)
-                        .map(|tab| tab.selected_color)
+                        .map(|tab| tab.selected_color.clone())
                         .unwrap_or_default(),
                     left_panel,
                     right_panel,
@@ -11485,7 +11491,7 @@ impl Workspace {
                 .map(|group| TabGroupSnapshot {
                     id: group.id,
                     name: group.name.clone(),
-                    color: group.color,
+                    color: group.color.clone(),
                     collapsed: group.collapsed,
                     pinned: FeatureFlag::PinnedTabs.is_enabled() && group.pinned,
                 })
@@ -12545,7 +12551,7 @@ impl Workspace {
 
         // Capture the active tab's colors before creating the new tab.
         let active_tab = self.tabs.get(self.active_tab_index);
-        let active_tab_selected_color = active_tab.map(|tab| tab.selected_color);
+        let active_tab_selected_color = active_tab.map(|tab| tab.selected_color.clone());
         let active_tab_default_color = active_tab.and_then(|tab| tab.default_directory_color);
 
         let is_new_terminal = matches!(panes_layout, PanesLayout::SingleTerminal(_));
@@ -12596,9 +12602,10 @@ impl Workspace {
 
         if !is_restoration {
             if *TabSettings::as_ref(ctx).preserve_active_tab_color.value() {
-                if let Some(SelectedTabColor::Color(color)) = active_tab_selected_color {
-                    self.tabs[self.active_tab_index].selected_color =
-                        SelectedTabColor::Color(color);
+                if let Some(color @ (SelectedTabColor::Color(_) | SelectedTabColor::Custom(_))) =
+                    active_tab_selected_color
+                {
+                    self.tabs[self.active_tab_index].selected_color = color;
                 }
             }
 
@@ -16503,7 +16510,7 @@ impl Workspace {
                                         .iter()
                                         .find(|t| t.pane_group.id() == pane_group.id())
                                     {
-                                        let selected = source_tab.selected_color;
+                                        let selected = source_tab.selected_color.clone();
                                         let default = source_tab.default_directory_color;
                                         self.tabs[self.active_tab_index].selected_color = selected;
                                         self.tabs[self.active_tab_index].default_directory_color =
@@ -19710,7 +19717,7 @@ impl Workspace {
         let group_color: Option<ColorU> = group
             .color
             .resolve(None)
-            .map(|c| c.to_ansi_color(&theme.terminal_colors().normal).into());
+            .map(|c| c.to_color_u(&theme.terminal_colors().normal));
 
         let mouse_states = self
             .horizontal_tab_group_mouse_states
@@ -23842,9 +23849,9 @@ impl TypedActionView for Workspace {
                     .get(self.active_tab_index)
                     .and_then(|t| t.group_id);
                 if let Some(group_id) = active_group_id {
-                    self.set_tab_group_color(group_id, *color, ctx);
+                    self.set_tab_group_color(group_id, color.clone(), ctx);
                 } else {
-                    self.set_tab_color(self.active_tab_index, *color, ctx);
+                    self.set_tab_color(self.active_tab_index, color.clone(), ctx);
                 }
             }
             ToggleTabRightClickMenu { tab_index, anchor } => {
@@ -24317,9 +24324,11 @@ impl TypedActionView for Workspace {
             CheckForUpdate => self.manual_check_for_update(ctx),
             SetA11yVerbosityLevel(verbosity) => self.set_a11y_verbosity(*verbosity, ctx),
             ToggleNotifications => self.toggle_notifications(ctx),
-            ToggleTabColor { color, tab_index } => self.toggle_tab_color(*tab_index, *color, ctx),
+            ToggleTabColor { color, tab_index } => {
+                self.toggle_tab_color(*tab_index, color.clone(), ctx)
+            }
             ToggleTabGroupColor { color, group_id } => {
-                self.toggle_tab_group_color(*group_id, *color, ctx)
+                self.toggle_tab_group_color(*group_id, color.clone(), ctx)
             }
             DispatchToSettingsTab(action) => {
                 let window_id = ctx.window_id();
@@ -27766,7 +27775,7 @@ impl Workspace {
     fn tab_transfer_info_at_index(&self, index: usize, ctx: &AppContext) -> Option<TransferredTab> {
         let tab = self.tabs.get(index)?;
         let pane_group = tab.pane_group.clone();
-        let color = tab.color();
+        let color = tab.ansi_color();
         let draggable_state = tab.draggable_state.clone();
         let custom_title = pane_group.read(ctx, |pg, ctx| pg.custom_title(ctx));
         let left_panel_open = pane_group.read(ctx, |pg, _| pg.left_panel_open);

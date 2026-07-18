@@ -1228,7 +1228,7 @@ fn test_set_active_tab_color() {
             );
             assert_eq!(
                 workspace.tabs[active].color(),
-                Some(AnsiColorIdentifier::Magenta),
+                Some(crate::tab::TabColor::Ansi(AnsiColorIdentifier::Magenta)),
             );
 
             // Replacing with a different color overwrites the previous selection.

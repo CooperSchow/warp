@@ -86,8 +86,12 @@ pub struct TabSnapshot {
 }
 
 impl TabSnapshot {
+    /// The snapshot's resolved tab color as an ANSI token (custom hex colors
+    /// resolve to `None` here — the launch-config schema only models ANSI colors).
     pub(crate) fn color(&self) -> Option<AnsiColorIdentifier> {
-        self.selected_color.resolve(self.default_directory_color)
+        self.selected_color
+            .resolve(self.default_directory_color)
+            .and_then(|c| c.ansi_id())
     }
 }
 

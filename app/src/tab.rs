@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use settings::Setting as _;
 use warp_core::context_flag::ContextFlag;
 use warp_core::ui::builder::UiBuilder;
+use warp_core::ui::color::hex_color::coloru_from_hex_string;
 use warp_core::ui::theme::color::internal_colors;
 use warp_core::ui::theme::AnsiColors;
 use warpui::elements::{
@@ -109,28 +110,82 @@ const TAB_PINNED_CONTENT_HORIZONTAL_PADDING: f32 = 26.0;
 pub(crate) const TAB_PIN_VANISH_THRESHOLD: f32 = 70.0;
 
 /// Represents the user's manual tab-color selection state.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SelectedTabColor {
     /// No manual override — fall back to the default directory color.
     #[default]
     Unset,
     /// User explicitly cleared the color (overrides any default).
     Cleared,
-    /// User explicitly chose this color.
+    /// User explicitly chose this ANSI color.
     Color(AnsiColorIdentifier),
+    /// User explicitly chose a custom hex color (`#rrggbb`) from the tab-color
+    /// palette. Additive variant — older builds/settings never wrote it, and its
+    /// externally-tagged serde form keeps persisted tab state backward-compatible.
+    Custom(String),
 }
 
 impl SelectedTabColor {
     /// Resolves the effective tab color: manual selection takes priority,
     /// falling back to `default` when no override is set.
-    pub(crate) fn resolve(
-        self,
-        default: Option<AnsiColorIdentifier>,
-    ) -> Option<AnsiColorIdentifier> {
+    pub(crate) fn resolve(&self, default: Option<AnsiColorIdentifier>) -> Option<TabColor> {
         match self {
-            SelectedTabColor::Color(c) => Some(c),
+            SelectedTabColor::Color(c) => Some(TabColor::Ansi(*c)),
+            SelectedTabColor::Custom(hex) => Some(TabColor::Custom(hex.clone())),
             SelectedTabColor::Cleared => None,
-            SelectedTabColor::Unset => default,
+            SelectedTabColor::Unset => default.map(TabColor::Ansi),
+        }
+    }
+}
+
+/// A concrete tab-color choice used throughout the tab-color pipeline (picker,
+/// actions, rendering). Unlike [`AnsiColorIdentifier`] alone, it can carry a
+/// fixed custom hex color chosen by the user in the tab-color palette settings.
+///
+/// `Ansi` colors remain theme-aware (resolved against the live terminal palette);
+/// `Custom` colors are fixed RGB stored as a `#rrggbb` string so the enum stays
+/// trivially (de)serializable and backward-compatible in persisted tab state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TabColor {
+    Ansi(AnsiColorIdentifier),
+    Custom(String),
+}
+
+impl TabColor {
+    /// Resolves this choice to a concrete `ColorU` against the given terminal
+    /// palette. A malformed custom hex falls back to the theme's blue so a bad
+    /// settings value can never panic or render an invisible color.
+    pub(crate) fn to_color_u(&self, colors: &AnsiColors) -> ColorU {
+        match self {
+            TabColor::Ansi(id) => id.to_ansi_color(colors).into(),
+            TabColor::Custom(hex) => coloru_from_hex_string(hex)
+                .unwrap_or_else(|_| AnsiColorIdentifier::Blue.to_ansi_color(colors).into()),
+        }
+    }
+
+    /// Human-readable label for tooltips (the ANSI name or the hex string).
+    pub(crate) fn label(&self) -> String {
+        match self {
+            TabColor::Ansi(id) => id.to_string(),
+            TabColor::Custom(hex) => hex.clone(),
+        }
+    }
+
+    /// The ANSI token if this is an ANSI color, else `None`. Used by data/serialized
+    /// paths (launch configs, tab transfer, tab-navigation) that only model ANSI
+    /// colors — a custom color gracefully degrades to "no color" there.
+    pub(crate) fn ansi_id(&self) -> Option<AnsiColorIdentifier> {
+        match self {
+            TabColor::Ansi(id) => Some(*id),
+            TabColor::Custom(_) => None,
+        }
+    }
+
+    /// The `SelectedTabColor` a tab should store when this color is chosen.
+    pub(crate) fn as_selected(&self) -> SelectedTabColor {
+        match self {
+            TabColor::Ansi(id) => SelectedTabColor::Color(*id),
+            TabColor::Custom(hex) => SelectedTabColor::Custom(hex.clone()),
         }
     }
 }
@@ -211,8 +266,15 @@ impl TabData {
     }
 
     /// The resolved tab color: manual selection takes priority over directory default.
-    pub fn color(&self) -> Option<AnsiColorIdentifier> {
+    /// May be an ANSI token or a custom hex color.
+    pub fn color(&self) -> Option<TabColor> {
         self.selected_color.resolve(self.default_directory_color)
+    }
+
+    /// The resolved tab color as an ANSI token, or `None` if unset or a custom
+    /// hex color. Used by data/serialized paths that only model ANSI colors.
+    pub fn ansi_color(&self) -> Option<AnsiColorIdentifier> {
+        self.color().and_then(|c| c.ansi_id())
     }
 
     /// True when this tab's top-level name is not shown because it is a member of
@@ -703,7 +765,7 @@ impl TabData {
                 .map(|color_option| {
                     let color = color_option.to_ansi_color(&terminal_colors);
                     MenuItemFields::new_with_icon(
-                        if self.color() == Some(*color_option) {
+                        if self.color() == Some(TabColor::Ansi(*color_option)) {
                             TAB_NO_COLOR_ICON_PATH
                         } else {
                             TAB_COLOR_ICON_PATH
@@ -713,7 +775,7 @@ impl TabData {
                     )
                     .no_highlight_on_hover()
                     .with_on_select_action(WorkspaceAction::ToggleTabColor {
-                        color: *color_option,
+                        color: TabColor::Ansi(*color_option),
                         tab_index: index,
                     })
                 })
@@ -732,7 +794,7 @@ pub(crate) enum ColorPickerTarget {
 }
 
 impl ColorPickerTarget {
-    fn toggle_action(self, color: AnsiColorIdentifier) -> WorkspaceAction {
+    fn toggle_action(self, color: TabColor) -> WorkspaceAction {
         match self {
             ColorPickerTarget::Tab { tab_index } => {
                 WorkspaceAction::ToggleTabColor { color, tab_index }
@@ -750,11 +812,15 @@ impl ColorPickerTarget {
 /// selected-dot ring and the clear dot's toggle-off; `target` selects which toggle
 /// action is dispatched on click, either tab or group color selection.
 pub(crate) fn color_picker_menu_items(
-    current_color: Option<AnsiColorIdentifier>,
+    current_color: Option<TabColor>,
     terminal_colors: AnsiColors,
     target: ColorPickerTarget,
 ) -> Vec<MenuItem<WorkspaceAction>> {
-    let mouse_states: Vec<MouseStateHandle> = (0..TAB_COLOR_OPTIONS.len() + 1)
+    let palette: Vec<TabColor> = TAB_COLOR_OPTIONS
+        .iter()
+        .map(|id| TabColor::Ansi(*id))
+        .collect();
+    let mouse_states: Vec<MouseStateHandle> = (0..palette.len() + 1)
         .map(|_| MouseStateHandle::default())
         .collect();
 
@@ -769,37 +835,42 @@ pub(crate) fn color_picker_menu_items(
                     .with_cross_axis_alignment(CrossAxisAlignment::Center)
                     .with_main_axis_size(MainAxisSize::Max);
 
-                for (ansi_id, mouse_state) in std::iter::once(None)
-                    .chain(TAB_COLOR_OPTIONS.iter().copied().map(Some))
+                for (entry, mouse_state) in std::iter::once(None)
+                    .chain(palette.iter().cloned().map(Some))
                     .zip(mouse_states.iter().cloned())
                 {
-                    let is_selected = match ansi_id {
+                    let is_selected = match &entry {
                         None => current_color.is_none(),
-                        Some(id) => current_color == Some(id),
+                        Some(tc) => current_color.as_ref() == Some(tc),
                     };
-                    let dot_color: ColorU = match ansi_id {
+                    let dot_color: ColorU = match &entry {
                         None => ColorU::transparent_black(),
-                        Some(id) => id.to_ansi_color(&terminal_colors).into(),
+                        Some(tc) => tc.to_color_u(&terminal_colors),
                     };
-                    let tooltip = match ansi_id {
+                    let tooltip = match &entry {
                         None => "Default (no color)".to_string(),
-                        Some(id) => id.to_string(),
+                        Some(tc) => tc.label(),
                     };
+                    let is_no_color = entry.is_none();
+
+                    // Owned copies for the click handler (TabColor is not Copy).
+                    let click_color = entry.clone();
+                    let fallback = current_color.clone();
 
                     let dot = render_color_dot(
                         mouse_state,
                         dot_color,
                         is_selected,
                         ring_color,
-                        ansi_id.is_none(),
+                        is_no_color,
                         theme.foreground(),
                         tooltip,
                         appearance,
                     )
                     .on_click(move |ctx, _, _| {
-                        if let Some(color) = ansi_id {
+                        if let Some(color) = click_color.clone() {
                             ctx.dispatch_typed_action(target.toggle_action(color));
-                        } else if let Some(color) = current_color {
+                        } else if let Some(color) = fallback.clone() {
                             ctx.dispatch_typed_action(target.toggle_action(color));
                         }
                         ctx.dispatch_typed_action(MenuAction::Close(true));
@@ -924,10 +995,10 @@ impl TabStyles {
 
     /// Returns the default styling (based on the current settings and ui builder, hence not
     /// implementing Default trait).
-    fn default(appearance: &Appearance, tab_color: Option<AnsiColorIdentifier>) -> TabStyles {
+    fn default(appearance: &Appearance, tab_color: Option<TabColor>) -> TabStyles {
         let theme = appearance.theme();
-        let active_tab_bar_color: Option<ThemeFill> =
-            tab_color.map(|color| color.to_ansi_color(&theme.terminal_colors().normal).into());
+        let active_tab_bar_color: Option<ThemeFill> = tab_color
+            .map(|color| color.to_color_u(&theme.terminal_colors().normal).into());
         let error_color = theme.ui_error_color();
         let sharing_color = shared_session_indicator_color(appearance);
         let background = active_tab_bar_color.map(|color| {
@@ -1090,7 +1161,7 @@ impl<'a> TabComponent<'a> {
 
     /// Overrides the effective color used to build tab styles. Used when the
     /// tab's color should be driven by its group rather than its own data.
-    pub fn with_effective_color(mut self, color: Option<AnsiColorIdentifier>) -> Self {
+    pub fn with_effective_color(mut self, color: Option<TabColor>) -> Self {
         self.styles = TabStyles::default(self.appearance, color);
         self
     }

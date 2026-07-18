@@ -2872,7 +2872,7 @@ fn render_grouped_tabs_header(
     let group_color_fill: Option<ThemeFill> = group
         .color
         .resolve(None)
-        .map(|c| c.to_ansi_color(&theme.terminal_colors().normal).into());
+        .map(|c| c.to_color_u(&theme.terminal_colors().normal).into());
 
     let mut hoverable = Hoverable::new(mouse_states.header.clone(), move |state| {
         let border_fill = if is_header_selected {
@@ -3097,7 +3097,7 @@ fn render_grouped_tab_container(
         let group_color_fill: Option<ThemeFill> = group
             .color
             .resolve(None)
-            .map(|c| c.to_ansi_color(&theme.terminal_colors().normal).into());
+            .map(|c| c.to_color_u(&theme.terminal_colors().normal).into());
         let is_highlighted = hover_state.is_hovered() || any_member_active;
         let background = if let Some(color) = group_color_fill {
             // Highlight a colored tab group when it is hovered or active,
@@ -5519,7 +5519,7 @@ fn compute_tab_group_color_mode(
     if !matches!(tab.selected_color, SelectedTabColor::Unset) {
         return match tab.selected_color.resolve(tab.default_directory_color) {
             Some(color) => TabGroupColorMode::Uniform(
-                color.to_ansi_color(&theme.terminal_colors().normal).into(),
+                color.to_color_u(&theme.terminal_colors().normal).into(),
             ),
             None => TabGroupColorMode::None,
         };
