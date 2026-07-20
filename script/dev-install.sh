@@ -1,31 +1,33 @@
 #!/usr/bin/env bash
 #
-# Safely (re)install the locally-built WarpOss.app to ~/Applications.
+# Install / update the ONE canonical WarpOss.app at ~/Applications/WarpOss.app.
 #
-# This fork is ad-hoc signed (there is no Apple Developer identity on this
-# machine). Two things make a naive install crash the app, and this script
-# guards against both:
+# There is exactly one WarpOss on this machine: ~/Applications/WarpOss.app.
+# Build artifacts under target/ are excluded from Spotlight (target/.metadata_never_index)
+# so they never show up as extra copies in the app switcher / ctrl-space.
+#
+# This fork is ad-hoc signed (no Apple Developer identity here). Two things make a
+# naive install crash the app, and this script guards against both:
 #
 #   1. Hardened runtime. Signing with `--options runtime` makes the kernel
 #      strictly re-validate every executable page at runtime and SIGKILL the
-#      process on any mismatch ("Code Signature Invalid / Invalid Page"). That
-#      is fragile for a large ad-hoc debug binary under memory pressure. We sign
-#      plain ad-hoc (no hardened runtime), which avoids that entire kill class.
-#      Stock Warp doesn't need this because it is Developer-ID signed + notarized.
+#      process on any mismatch ("Code Signature Invalid / Invalid Page") -- fragile
+#      for a large ad-hoc debug binary. We sign plain ad-hoc (no hardened runtime).
 #
 #   2. Replacing a running app. macOS memory-maps the executable; overwriting the
 #      bundle while WarpOss is open invalidates those pages and crashes the live
-#      process instantly. So we refuse to install while it is running.
+#      process. So we refuse to install while it is running.
 #
-# Usage:  ./script/dev-install.sh
-#   (build first: DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-#                 PROTOC=/opt/homebrew/bin/protoc \
-#                 cargo build --bin warp-oss --features gui)
+# Usage:
+#   DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer PROTOC=/opt/homebrew/bin/protoc \
+#     cargo build --bin warp-oss --features gui        # everything else is default-on
+#   ./script/dev-install.sh
+#   open ~/Applications/WarpOss.app
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$REPO/target/debug/warp-oss"
-SRC_BUNDLE="$REPO/target/debug/bundle/osx/WarpOss.app"
+SEED_BUNDLE="$REPO/target/debug/bundle/osx/WarpOss.app"   # only used for first-time creation
 DEST="$HOME/Applications/WarpOss.app"
 ENTITLEMENTS="$REPO/script/Debug-Entitlements.plist"
 
@@ -35,21 +37,23 @@ if pgrep -x warp-oss >/dev/null 2>&1; then
   exit 1
 fi
 
-[ -f "$BIN" ] || { echo "error: no binary at $BIN — build it first." >&2; exit 1; }
-[ -d "$SRC_BUNDLE" ] || { echo "error: no app bundle at $SRC_BUNDLE — run ./script/run once to create it." >&2; exit 1; }
+[ -f "$BIN" ] || { echo "error: no binary at $BIN -- build it first (cargo build --bin warp-oss --features gui)." >&2; exit 1; }
 
-# Stage the freshly built binary into the bundle.
-cp "$BIN" "$SRC_BUNDLE/Contents/MacOS/warp-oss"
+# Keep target/ out of Spotlight so build-output bundles never appear as extra apps.
+touch "$REPO/target/.metadata_never_index" 2>/dev/null || true
 
-# ditto to ~/Applications strips resource forks / xattrs / quarantine that the
-# iCloud-synced repo `target/` dir keeps re-adding and that break code signing.
-rm -rf "$DEST"
-ditto --norsrc --noextattr --noqtn "$SRC_BUNDLE" "$DEST"
+if [ ! -d "$DEST" ]; then
+  # First-time install: seed the bundle structure from a `./script/run`/`cargo bundle` output.
+  [ -d "$SEED_BUNDLE" ] || { echo "error: no bundle at $SEED_BUNDLE -- run ./script/run once to create the initial bundle." >&2; exit 1; }
+  ditto --norsrc --noextattr --noqtn "$SEED_BUNDLE" "$DEST"
+fi
+
+# Update just the executable in the canonical bundle (Info.plist/Resources are stable
+# across builds), then re-sign in place. No dependency on the target/ bundle.
+cp "$BIN" "$DEST/Contents/MacOS/warp-oss"
 xattr -cr "$DEST" 2>/dev/null || true
-
-# Ad-hoc, deep, with entitlements — but deliberately NO --options runtime.
 codesign --force --deep --sign - --entitlements "$ENTITLEMENTS" "$DEST"
 codesign --verify --deep --strict "$DEST"
 
-echo "✅ installed ad-hoc (no hardened runtime): $DEST"
+echo "✅ updated the one WarpOss (ad-hoc, no hardened runtime): $DEST"
 echo "   launch:  open \"$DEST\""
