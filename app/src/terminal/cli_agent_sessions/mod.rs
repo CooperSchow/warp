@@ -181,6 +181,21 @@ impl CLIAgentSession {
         self.session_context.tool_input_preview = None;
     }
 
+    /// The id to resume this session with when its tab is restored: the transcript
+    /// file's stem (the exact id `claude --resume` resolves, and it only exists once
+    /// the session has been persisted to disk) if known, otherwise the reported
+    /// session id (validated for existence at restore time).
+    pub fn resume_id(&self) -> Option<String> {
+        let context = &self.session_context;
+        context
+            .transcript_path
+            .as_deref()
+            .map(std::path::Path::new)
+            .and_then(|path| path.file_stem())
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .or_else(|| context.session_id.clone())
+    }
+
     /// Applies an event to this session, updating context and status.
     /// Returns the new status if it changed, or `None` if the event was irrelevant.
     fn apply_event(&mut self, event: &CLIAgentEvent) -> Option<CLIAgentSessionStatus> {
@@ -339,6 +354,19 @@ impl CLIAgentSessionsModel {
 
     pub fn session(&self, terminal_view_id: EntityId) -> Option<&CLIAgentSession> {
         self.sessions.get(&terminal_view_id)
+    }
+
+    /// Finds a live Claude session whose working directory matches `cwd` and
+    /// returns the id to resume it with. This is the fallback used by snapshot
+    /// capture when a pane's terminal-view id doesn't line up with the id the
+    /// session was registered under — matching on cwd still recovers the session
+    /// so the tab can resume its conversation on restore.
+    pub fn resumable_claude_session_id_for_cwd(&self, cwd: &str) -> Option<String> {
+        self.sessions
+            .values()
+            .filter(|session| matches!(session.agent, CLIAgent::Claude))
+            .find(|session| session.session_context.cwd.as_deref() == Some(cwd))
+            .and_then(|session| session.resume_id())
     }
 
     /// Returns `true` if the rich input editor is currently open for this terminal.

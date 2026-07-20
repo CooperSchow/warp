@@ -580,27 +580,30 @@ impl PaneContent for TerminalPane {
 
             // The Claude Code session (if any) live in this pane, so it can be
             // resumed with `claude --resume <id>` when the tab is restored.
-            // Prefer the transcript file's stem — that is the exact id Claude
-            // resolves on `--resume`, and it only exists once the session has
-            // actually been persisted to disk — falling back to the reported
-            // session id (validated for existence at restore time).
-            let claude_session_id = CLIAgentSessionsModel::as_ref(app)
+            //
+            // Primary: look the session up by this pane's terminal-view id. Fallback:
+            // if that misses (the view id the session was registered under can differ
+            // from the pane's), recover it by matching the pane's cwd against all live
+            // Claude sessions. Either way, `resume_id()` prefers the transcript file's
+            // stem (the exact id `--resume` resolves) over the reported session id.
+            let pane_cwd = view.pwd_if_local(app);
+            let sessions = CLIAgentSessionsModel::as_ref(app);
+            let claude_session_id = sessions
                 .session(self.terminal_view(app).id())
                 .filter(|session| matches!(session.agent, CLIAgent::Claude))
-                .and_then(|session| {
-                    let context = &session.session_context;
-                    context
-                        .transcript_path
+                .and_then(|session| session.resume_id())
+                .or_else(|| {
+                    pane_cwd
                         .as_deref()
-                        .map(std::path::Path::new)
-                        .and_then(|path| path.file_stem())
-                        .map(|stem| stem.to_string_lossy().into_owned())
-                        .or_else(|| context.session_id.clone())
+                        .and_then(|cwd| sessions.resumable_claude_session_id_for_cwd(cwd))
                 });
+            if let Some(id) = &claude_session_id {
+                log::info!("[claude restore] captured session id {id} for snapshot");
+            }
 
             LeafContents::Terminal(TerminalPaneSnapshot {
                 uuid: self.uuid.clone(),
-                cwd: view.pwd_if_local(app),
+                cwd: pane_cwd,
                 is_active,
                 is_read_only: view.model.lock().is_read_only(),
                 shell_launch_data: view.shell_launch_data_if_local(app),
