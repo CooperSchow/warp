@@ -237,6 +237,65 @@ pub fn canonical_directory_key(path: &Path) -> String {
         .to_string()
 }
 
+/// User-defined custom hex tab colors (e.g. `#502fef`), in display order. They
+/// appear in the tab color picker alongside the built-in ANSI colors. Stored as
+/// `#rrggbb` strings; invalid or duplicate entries are ignored when the palette
+/// is resolved for rendering.
+#[derive(
+    Default,
+    Debug,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Eq,
+    schemars::JsonSchema,
+    settings_value::SettingsValue,
+)]
+#[schemars(description = "User-defined custom hex colors shown in the tab color picker.")]
+pub struct CustomTabColorPalette(pub(crate) Vec<String>);
+
+settings::macros::implement_setting_for_enum!(
+    CustomTabColorPalette,
+    TabSettings,
+    SupportedPlatforms::ALL,
+    SyncToCloud::Never,
+    surface: settings::SettingSurfaces::GUI,
+    private: false,
+    toml_path: "appearance.tabs.custom_color_palette",
+    max_table_depth: 0,
+    description: "User-defined custom hex colors shown in the tab color picker.",
+    feature_flag: warp_core::features::FeatureFlag::CustomTabColors,
+);
+
+impl CustomTabColorPalette {
+    /// The stored custom hex colors, in order.
+    pub fn colors(&self) -> &[String] {
+        &self.0
+    }
+
+    /// Returns a new palette with `hex` normalized (`#rrggbb`, lowercase) and
+    /// appended, unless it is already present.
+    pub fn with_added(&self, hex: &str) -> Self {
+        let normalized = hex.trim().to_lowercase();
+        let mut colors = self.0.clone();
+        if !colors.iter().any(|c| c.eq_ignore_ascii_case(&normalized)) {
+            colors.push(normalized);
+        }
+        Self(colors)
+    }
+
+    /// Returns a new palette with the color at `index` removed (a no-op when out
+    /// of range).
+    pub fn without_index(&self, index: usize) -> Self {
+        let mut colors = self.0.clone();
+        if index < colors.len() {
+            colors.remove(index);
+        }
+        Self(colors)
+    }
+}
+
 #[derive(
     Clone,
     Debug,
@@ -577,6 +636,7 @@ define_settings_group!(TabSettings, settings: [
     workspace_decoration_visibility: WorkspaceDecorationVisibility,
     close_button_position: TabCloseButtonPosition,
     directory_tab_colors: DirectoryTabColors,
+    custom_tab_color_palette: CustomTabColorPalette,
 ]);
 
 #[cfg(test)]

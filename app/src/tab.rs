@@ -340,7 +340,7 @@ impl TabData {
             self.modify_tab_menu_items(index, can_move_left, can_move_right, pane_name_target, ctx),
             self.close_tab_menu_items(index, tabs_len, ctx),
             Self::save_config_menu_items(index),
-            self.color_option_menu_items(index, terminal_colors),
+            self.color_option_menu_items(index, terminal_colors, ctx),
         ] {
             // Skip empty sections so we don't emit a trailing separator (e.g.
             // when a grouped tab hides the color picker).
@@ -741,10 +741,12 @@ impl TabData {
         &self,
         index: usize,
         terminal_colors: AnsiColors,
+        ctx: &AppContext,
     ) -> Vec<MenuItem<WorkspaceAction>> {
         if FeatureFlag::DirectoryTabColors.is_enabled() {
             color_picker_menu_items(
                 self.color(),
+                tab_color_palette(ctx),
                 terminal_colors,
                 ColorPickerTarget::Tab { tab_index: index },
             )
@@ -806,20 +808,40 @@ impl ColorPickerTarget {
     }
 }
 
-/// Builds the shared dot-based color picker menu section (a single custom row)
-/// used by both the per-tab and per-group color selectors. The leading dot clears
-/// the color; the rest are the `TAB_COLOR_OPTIONS`. `current_color` drives the
-/// selected-dot ring and the clear dot's toggle-off; `target` selects which toggle
-/// action is dispatched on click, either tab or group color selection.
-pub(crate) fn color_picker_menu_items(
-    current_color: Option<TabColor>,
-    terminal_colors: AnsiColors,
-    target: ColorPickerTarget,
-) -> Vec<MenuItem<WorkspaceAction>> {
-    let palette: Vec<TabColor> = TAB_COLOR_OPTIONS
+/// The tab-color palette offered in the picker: the built-in ANSI colors,
+/// followed by the user's custom hex colors when the `CustomTabColors` feature
+/// is enabled. Invalid custom hex entries are skipped.
+pub(crate) fn tab_color_palette(app: &AppContext) -> Vec<TabColor> {
+    let mut palette: Vec<TabColor> = TAB_COLOR_OPTIONS
         .iter()
         .map(|id| TabColor::Ansi(*id))
         .collect();
+    if FeatureFlag::CustomTabColors.is_enabled() {
+        for hex in TabSettings::as_ref(app)
+            .custom_tab_color_palette
+            .value()
+            .colors()
+        {
+            if coloru_from_hex_string(hex).is_ok() {
+                palette.push(TabColor::Custom(hex.clone()));
+            }
+        }
+    }
+    palette
+}
+
+/// Builds the shared dot-based color picker menu section (a single custom row)
+/// used by both the per-tab and per-group color selectors. The leading dot clears
+/// the color; the rest are the entries of `palette` (built-in ANSI colors plus any
+/// user-defined custom colors). `current_color` drives the selected-dot ring and
+/// the clear dot's toggle-off; `target` selects which toggle action is dispatched
+/// on click, either tab or group color selection.
+pub(crate) fn color_picker_menu_items(
+    current_color: Option<TabColor>,
+    palette: Vec<TabColor>,
+    terminal_colors: AnsiColors,
+    target: ColorPickerTarget,
+) -> Vec<MenuItem<WorkspaceAction>> {
     let mouse_states: Vec<MouseStateHandle> = (0..palette.len() + 1)
         .map(|_| MouseStateHandle::default())
         .collect();

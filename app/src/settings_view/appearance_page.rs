@@ -85,7 +85,10 @@ use crate::ui_components::icons::Icon;
 use crate::user_config::WarpConfig;
 use crate::util::bindings;
 use crate::view_components::action_button::{ActionButton, ButtonSize, NakedTheme};
-use crate::view_components::{Dropdown, DropdownItem, FilterableDropdown};
+use crate::view_components::{
+    Dropdown, DropdownItem, FilterableDropdown, SubmittableTextInput, SubmittableTextInputEvent,
+};
+use warp_core::ui::color::hex_color::{coloru_from_hex_string, coloru_to_hex_string};
 use crate::window_settings::{
     BackgroundBlurRadius, BackgroundBlurTexture, BackgroundOpacity, LeftPanelVisibilityAcrossTabs,
     OpenWindowsAtCustomSize, WindowSettings, WindowSettingsChangedEvent, ZoomLevel,
@@ -547,6 +550,7 @@ pub enum AppearancePageAction {
     RemoveDefaultDirectoryTabColor {
         path: PathBuf,
     },
+    RemoveCustomTabColor(usize),
 }
 
 pub struct AppearanceSettingsPageView {
@@ -580,6 +584,7 @@ pub struct AppearanceSettingsPageView {
     alt_screen_padding_editor: ViewHandle<EditorView>,
     color_picker_dot_states: Vec<Vec<MouseStateHandle>>,
     directory_tab_color_delete_buttons: Vec<ViewHandle<ActionButton>>,
+    custom_tab_color_swatch_states: Vec<MouseStateHandle>,
     header_toolbar_inline_editor: ViewHandle<HeaderToolbarInlineEditor>,
 
     /// The context chip renderers based on the most recently
@@ -788,6 +793,17 @@ impl TypedActionView for AppearanceSettingsPageView {
                         .value()
                         .with_color(&path, DirectoryTabColor::Suppressed);
                     let _ = settings.directory_tab_colors.set_value(new_value, ctx);
+                });
+                ctx.notify();
+            }
+            RemoveCustomTabColor(index) => {
+                let index = *index;
+                TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                    let new_value = settings
+                        .custom_tab_color_palette
+                        .value()
+                        .without_index(index);
+                    let _ = settings.custom_tab_color_palette.set_value(new_value, ctx);
                 });
                 ctx.notify();
             }
@@ -1351,6 +1367,9 @@ impl AppearanceSettingsPageView {
                 })
                 .collect(),
             directory_tab_color_delete_buttons: build_directory_delete_buttons(ctx),
+            custom_tab_color_swatch_states: (0..custom_tab_colors(ctx).len())
+                .map(|_| MouseStateHandle::default())
+                .collect(),
             header_toolbar_inline_editor,
             alt_screen_padding_editor,
             context_chips,
@@ -1545,6 +1564,22 @@ impl AppearanceSettingsPageView {
                 me.handle_directory_color_add_picker_event(event, ctx);
             });
             tab_settings_widgets.push(Box::new(DirectoryTabColorsWidget { add_picker }));
+        }
+
+        if FeatureFlag::CustomTabColors.is_enabled() {
+            let input = ctx.add_typed_action_view(|ctx| {
+                let mut input = SubmittableTextInput::new(ctx)
+                    .validate_on_edit(|s| coloru_from_hex_string(s.trim()).is_ok());
+                input.set_placeholder_text("#502fef", ctx);
+                input.set_outer_margins(0., 0., ctx);
+                input
+            });
+            ctx.subscribe_to_view(&input, |me, _, event, ctx| {
+                if let SubmittableTextInputEvent::Submit(hex) = event {
+                    me.add_custom_tab_color(hex, ctx);
+                }
+            });
+            tab_settings_widgets.push(Box::new(CustomTabColorsWidget { input }));
         }
 
         categories.push(Category::new("Tabs", tab_settings_widgets));
@@ -2657,6 +2692,26 @@ impl AppearanceSettingsPageView {
             });
             self.directory_tab_color_delete_buttons = build_directory_delete_buttons(ctx);
         }
+        if let TabSettingsChangedEvent::CustomTabColorPalette { .. } = event {
+            let count = custom_tab_colors(ctx).len();
+            self.custom_tab_color_swatch_states
+                .resize_with(count, MouseStateHandle::default);
+        }
+        ctx.notify();
+    }
+
+    /// Appends a custom hex color to the palette, canonicalized to `#rrggbb`.
+    fn add_custom_tab_color(&mut self, hex: &str, ctx: &mut ViewContext<Self>) {
+        let canonical = coloru_from_hex_string(hex.trim())
+            .map(|color| coloru_to_hex_string(&color))
+            .unwrap_or_else(|_| hex.trim().to_lowercase());
+        TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+            let new_value = settings
+                .custom_tab_color_palette
+                .value()
+                .with_added(&canonical);
+            let _ = settings.custom_tab_color_palette.set_value(new_value, ctx);
+        });
         ctx.notify();
     }
 
@@ -5211,6 +5266,104 @@ fn directory_tab_colors(app: &AppContext) -> Vec<(String, DirectoryTabColor)> {
         .collect();
     sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
     sorted
+}
+
+/// The user's configured custom hex tab colors, in display order.
+fn custom_tab_colors(app: &AppContext) -> Vec<String> {
+    TabSettings::as_ref(app)
+        .custom_tab_color_palette
+        .value()
+        .colors()
+        .to_vec()
+}
+
+/// Settings widget: lets the user add/remove custom hex colors that show up in
+/// the tab color picker alongside the built-in ANSI colors.
+struct CustomTabColorsWidget {
+    input: ViewHandle<SubmittableTextInput>,
+}
+
+impl SettingsWidget for CustomTabColorsWidget {
+    type View = AppearanceSettingsPageView;
+
+    fn search_terms(&self) -> &str {
+        "custom tab color hex palette swatch"
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let mut content = Flex::column().with_spacing(8.);
+
+        let header = Flex::column()
+            .with_spacing(4.)
+            .with_child(
+                Text::new(
+                    "Custom tab colors",
+                    appearance.ui_font_family(),
+                    appearance.ui_font_size(),
+                )
+                .with_color(theme.active_ui_text_color().into())
+                .soft_wrap(false)
+                .finish(),
+            )
+            .with_child(
+                Text::new(
+                    "Add your own colors to the tab color picker. Enter a hex code like #502fef.",
+                    appearance.ui_font_family(),
+                    appearance.ui_font_size(),
+                )
+                .with_color(theme.nonactive_ui_text_color().into())
+                .finish(),
+            )
+            .finish();
+        content.add_child(header);
+
+        // Existing custom colors: a row of swatches. Clicking a swatch removes it.
+        let colors = custom_tab_colors(app);
+        if !colors.is_empty() {
+            let mut swatches = Flex::row()
+                .with_spacing(8.)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center);
+            for (idx, hex) in colors.iter().enumerate() {
+                let Some(mouse_state) = view.custom_tab_color_swatch_states.get(idx).cloned() else {
+                    continue;
+                };
+                let dot_color = coloru_from_hex_string(hex)
+                    .unwrap_or_else(|_| pathfinder_color::ColorU::transparent_black());
+                swatches.add_child(
+                    render_color_dot(
+                        mouse_state,
+                        dot_color,
+                        false,
+                        theme.accent().into(),
+                        false,
+                        theme.foreground(),
+                        format!("Remove {hex}"),
+                        appearance,
+                    )
+                    .on_click(move |ctx, _, _| {
+                        ctx.dispatch_typed_action(AppearancePageAction::RemoveCustomTabColor(idx));
+                    })
+                    .finish(),
+                );
+            }
+            content.add_child(swatches.finish());
+        }
+
+        // Hex input to add a new color (submits on Enter or the embedded button).
+        content.add_child(
+            ConstrainedBox::new(ChildView::new(&self.input).finish())
+                .with_width(220.)
+                .finish(),
+        );
+
+        content.finish()
+    }
 }
 
 struct DirectoryTabColorsWidget {

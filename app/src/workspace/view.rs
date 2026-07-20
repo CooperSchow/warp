@@ -354,7 +354,8 @@ use crate::settings_view::{flags, SettingsSection, SettingsView, SettingsViewEve
 #[cfg(all(target_os = "windows", feature = "local_tty"))]
 use crate::shell_indicator::ShellIndicatorType;
 use crate::tab::{
-    color_picker_menu_items, tab_position_id, uses_vertical_tabs, ColorPickerTarget,
+    color_picker_menu_items, tab_color_palette, tab_position_id, uses_vertical_tabs,
+    ColorPickerTarget,
     NewSessionMenuItem, PaneNameMenuTarget, SelectedTabColor, TabColor, TabBarState, TabComponent,
     TabData,
     TabTelemetryAction, COMPACT_TAB_WIDTH_THRESHOLD, MOVE_TO_GROUP_LABEL, TAB_BAR_BORDER_HEIGHT,
@@ -3810,7 +3811,8 @@ impl Workspace {
             }
             | TabSettingsChangedEvent::VerticalTabsShowPrLink { .. }
             | TabSettingsChangedEvent::VerticalTabsShowDiffStats { .. }
-            | TabSettingsChangedEvent::HideTitleBarSearchBarInVerticalTabs { .. } => {
+            | TabSettingsChangedEvent::HideTitleBarSearchBarInVerticalTabs { .. }
+            | TabSettingsChangedEvent::CustomTabColorPalette { .. } => {
                 ctx.notify();
             }
             TabSettingsChangedEvent::VerticalTabsShowDetailsOnHover { .. } => {
@@ -7703,7 +7705,7 @@ impl Workspace {
 
         let terminal_colors = Appearance::as_ref(ctx).theme().terminal_colors().normal;
         let menu_items =
-            self.tab_group_menu_items(group_id, uses_vertical_tabs(ctx), terminal_colors);
+            self.tab_group_menu_items(group_id, uses_vertical_tabs(ctx), terminal_colors, ctx);
         ctx.update_view(&self.tab_right_click_menu, |context_menu, view_ctx| {
             context_menu.set_items(menu_items, view_ctx);
         });
@@ -9781,6 +9783,7 @@ impl Workspace {
         group_id: TabGroupId,
         is_vertical: bool,
         terminal_colors: AnsiColors,
+        ctx: &AppContext,
     ) -> Vec<MenuItem<WorkspaceAction>> {
         let Some((first, last)) = group_member_index_range(&self.tabs, group_id) else {
             return vec![];
@@ -9883,6 +9886,7 @@ impl Workspace {
                 .and_then(|g| g.color.resolve(None));
             color_picker_menu_items(
                 effective_color,
+                tab_color_palette(ctx),
                 terminal_colors,
                 ColorPickerTarget::Group { group_id },
             )

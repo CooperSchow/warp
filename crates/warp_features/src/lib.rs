@@ -750,6 +750,11 @@ pub enum FeatureFlag {
     /// adopt the configured color when their working directory matches.
     DirectoryTabColors,
 
+    /// Enables a user-defined palette of custom hex tab colors (configured in
+    /// Settings ▸ Appearance ▸ Tabs) that appear in the tab color picker
+    /// alongside the built-in ANSI colors.
+    CustomTabColors,
+
     /// Enables the new settings to control visibility of Warp Drive, Code Review Panel,
     /// and Project Explorer & Global Search features.
     OpenWarpNewSettingsModes,
