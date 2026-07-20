@@ -182,6 +182,14 @@ pub fn claude_projects_dir() -> Option<PathBuf> {
     Some(base.join("projects"))
 }
 
+/// Sentinel stored in a pane's `claude_session_id` when we know the pane was
+/// running Claude (its terminal session was command-detected as Claude) but we
+/// don't have an exact conversation id to resume — e.g. the Warp Claude plugin
+/// wasn't emitting session events. On restore this triggers `claude --continue`,
+/// which reopens the most recent conversation in the restored working directory.
+/// It is deliberately not a valid session-id/UUID so it can never collide with one.
+pub const CLAUDE_CONTINUE_SENTINEL: &str = "__warp_claude_continue__";
+
 /// True if a resumable Claude session transcript named `<id>.jsonl` exists under
 /// any project directory in the Claude store. Used to guard `claude --resume <id>`
 /// on tab restore so a stale, deleted, or never-persisted ("phantom") session id

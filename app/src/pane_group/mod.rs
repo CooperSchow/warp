@@ -1691,15 +1691,19 @@ impl PaneGroup {
                 // blank shell. Runs once the restored shell finishes bootstrapping,
                 // like a launch-config setup command.
                 //
-                // If the exact transcript is on disk, `--resume <id>` reopens that
-                // precise conversation. Otherwise the id is stale/rotated but this WAS
-                // a Claude tab, so fall back to `claude --continue`, which resumes the
-                // most recent conversation in the restored cwd — still the right one in
-                // the common case, and never errors with "No conversation found".
+                // A sentinel (or a stale/rotated id whose transcript is gone) means we
+                // know this was a Claude tab but not the exact conversation, so
+                // `claude --continue` reopens the most recent conversation in the
+                // restored cwd — the right one in the common case, and it never errors
+                // with "No conversation found". A real, on-disk id gets a precise
+                // `claude --resume <id>`.
                 if let Some(claude_id) = terminal_snapshot.claude_session_id.as_deref() {
-                    let command = if crate::terminal::cli_agent_sessions::history::session_file_exists(
-                        claude_id,
-                    ) {
+                    use crate::terminal::cli_agent_sessions::history::{
+                        session_file_exists, CLAUDE_CONTINUE_SENTINEL,
+                    };
+                    let command = if claude_id != CLAUDE_CONTINUE_SENTINEL
+                        && session_file_exists(claude_id)
+                    {
                         format!("claude --resume {claude_id}")
                     } else {
                         "claude --continue".to_string()

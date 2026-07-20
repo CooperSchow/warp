@@ -578,27 +578,34 @@ impl PaneContent for TerminalPane {
                         .active_conversation_id()
                 });
 
-            // The Claude Code session (if any) live in this pane, so it can be
-            // resumed with `claude --resume <id>` when the tab is restored.
+            // If this pane is running Claude Code, capture enough to reopen the
+            // conversation when the tab is restored.
             //
-            // Primary: look the session up by this pane's terminal-view id. Fallback:
-            // if that misses (the view id the session was registered under can differ
-            // from the pane's), recover it by matching the pane's cwd against all live
-            // Claude sessions. Either way, `resume_id()` prefers the transcript file's
-            // stem (the exact id `--resume` resolves) over the reported session id.
+            // Crucially this only requires that the pane's terminal session was
+            // *detected* as Claude (Warp's own command detection sets agent=Claude
+            // even with no plugin). If we also have an exact conversation id
+            // (`resume_id()` — from the plugin's session events), we store it for a
+            // precise `claude --resume <id>`. If not — the common case, since the
+            // plugin often isn't emitting — we store a sentinel so restore runs
+            // `claude --continue`, reopening the most recent conversation in the
+            // restored cwd. Either way a Claude tab never restores as a blank shell.
             let pane_cwd = view.pwd_if_local(app);
-            let sessions = CLIAgentSessionsModel::as_ref(app);
-            let claude_session_id = sessions
-                .session(self.terminal_view(app).id())
-                .filter(|session| matches!(session.agent, CLIAgent::Claude))
-                .and_then(|session| session.resume_id())
-                .or_else(|| {
-                    pane_cwd
-                        .as_deref()
-                        .and_then(|cwd| sessions.resumable_claude_session_id_for_cwd(cwd))
-                });
-            if let Some(id) = &claude_session_id {
-                log::info!("[claude restore] captured session id {id} for snapshot");
+            let tv_id = self.terminal_view(app).id();
+            let claude_session = CLIAgentSessionsModel::as_ref(app)
+                .session(tv_id)
+                .filter(|session| matches!(session.agent, CLIAgent::Claude));
+            let claude_session_id = claude_session.map(|session| {
+                session.resume_id().unwrap_or_else(|| {
+                    crate::terminal::cli_agent_sessions::history::CLAUDE_CONTINUE_SENTINEL
+                        .to_string()
+                })
+            });
+            if claude_session.is_some() {
+                log::info!(
+                    "[claude restore] captured claude tab: id={:?} cwd={:?}",
+                    claude_session_id,
+                    pane_cwd,
+                );
             }
 
             LeafContents::Terminal(TerminalPaneSnapshot {
