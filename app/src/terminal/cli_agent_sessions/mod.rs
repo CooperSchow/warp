@@ -369,6 +369,53 @@ impl CLIAgentSessionsModel {
             .and_then(|session| session.resume_id())
     }
 
+    /// Records that a restored tab is running a KNOWN Claude conversation, so the
+    /// next snapshot re-captures that exact id instead of decaying to the
+    /// `--continue` sentinel.
+    ///
+    /// This is what keeps each tab pinned to its own conversation across repeated
+    /// quit/relaunch cycles: a restored `claude --resume <id>` process doesn't
+    /// reliably re-emit a `session_start` event, so without this the id would be
+    /// lost on the next quit and every tab would collapse onto `--continue` (the
+    /// same, most-recent conversation). A live session that already carries a real
+    /// session id from plugin events takes precedence and is left untouched.
+    pub fn register_restored_claude_session(
+        &mut self,
+        terminal_view_id: EntityId,
+        session_id: String,
+        cwd: Option<String>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if self
+            .sessions
+            .get(&terminal_view_id)
+            .is_some_and(|s| s.session_context.session_id.is_some())
+        {
+            return;
+        }
+        self.set_session(
+            terminal_view_id,
+            CLIAgentSession {
+                agent: CLIAgent::Claude,
+                status: CLIAgentSessionStatus::InProgress,
+                session_context: CLIAgentSessionContext {
+                    session_id: Some(session_id),
+                    cwd,
+                    ..Default::default()
+                },
+                input_state: CLIAgentInputState::Closed,
+                should_auto_toggle_input: false,
+                listener: None,
+                plugin_version: None,
+                remote_host: None,
+                draft_text: None,
+                custom_command_prefix: None,
+                received_rich_notification: false,
+            },
+            ctx,
+        );
+    }
+
     /// Returns `true` if the rich input editor is currently open for this terminal.
     pub fn is_input_open(&self, terminal_view_id: EntityId) -> bool {
         self.sessions

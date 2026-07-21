@@ -1101,6 +1101,26 @@ enum AIDocumentPaneVisibilityAction {
     Toggle,
 }
 
+thread_local! {
+    /// Claude conversation ids already assigned to a restored tab during this
+    /// process's restore, so two tabs that only have the `--continue` sentinel
+    /// (and share a cwd) don't get pinned to the *same* conversation.
+    static RESTORE_ASSIGNED_CLAUDE_SESSIONS: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Picks the newest Claude conversation in `cwd` not yet handed to another restored
+/// tab this run, marks it used, and returns it. `None` when the cwd has no unused
+/// conversation (the caller then falls back to `claude --continue`).
+fn assign_distinct_claude_session(cwd: &str) -> Option<String> {
+    RESTORE_ASSIGNED_CLAUDE_SESSIONS.with(|used| {
+        let mut used = used.borrow_mut();
+        crate::terminal::cli_agent_sessions::history::session_ids_for_cwd(cwd)
+            .into_iter()
+            .find(|id| used.insert(id.clone()))
+    })
+}
+
 impl PaneGroup {
     /// Executes the provided callback for each TerminalView contained within
     /// this pane group.
@@ -1626,6 +1646,7 @@ impl PaneGroup {
 
                 let startup_directory = terminal_snapshot
                     .cwd
+                    .clone()
                     .map(PathBuf::from)
                     .filter(|path| path.is_dir());
 
@@ -1697,14 +1718,50 @@ impl PaneGroup {
                 // restored cwd — the right one in the common case, and it never errors
                 // with "No conversation found". A real, on-disk id gets a precise
                 // `claude --resume <id>`.
-                if let Some(claude_id) = terminal_snapshot.claude_session_id.as_deref() {
+                if let Some(claude_id) = terminal_snapshot
+                    .claude_session_id
+                    .as_deref()
+                    .filter(|id| !id.is_empty())
+                {
                     use crate::terminal::cli_agent_sessions::history::{
                         session_file_exists, CLAUDE_CONTINUE_SENTINEL,
                     };
-                    let command = if claude_id != CLAUDE_CONTINUE_SENTINEL
+                    use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
+
+                    // Resolve which conversation this tab should reopen:
+                    //  - the exact captured id when its transcript is on disk, or
+                    //  - (sentinel / rotated id) a distinct recent conversation in
+                    //    the tab's cwd, so multiple tabs don't all reopen the same
+                    //    `--continue` conversation.
+                    let resolved: Option<String> = if claude_id != CLAUDE_CONTINUE_SENTINEL
                         && session_file_exists(claude_id)
                     {
-                        format!("claude --resume {claude_id}")
+                        // Reserve this conversation so a sentinel tab's
+                        // distinct-assignment doesn't hand it to another tab too.
+                        RESTORE_ASSIGNED_CLAUDE_SESSIONS
+                            .with(|used| used.borrow_mut().insert(claude_id.to_string()));
+                        Some(claude_id.to_string())
+                    } else {
+                        terminal_snapshot
+                            .cwd
+                            .as_deref()
+                            .and_then(assign_distinct_claude_session)
+                    };
+
+                    let command = if let Some(id) = resolved {
+                        // Register the resolved id now so the NEXT snapshot
+                        // re-captures it, instead of decaying back to the sentinel
+                        // (a restored `claude` doesn't reliably re-emit a
+                        // session_start event we could otherwise capture). This is
+                        // what keeps each tab pinned to its own conversation across
+                        // repeated quit/relaunch cycles.
+                        let tv_id = terminal_view.id();
+                        let cwd = terminal_snapshot.cwd.clone();
+                        let reg_id = id.clone();
+                        CLIAgentSessionsModel::handle(ctx).update(ctx, |model, ctx| {
+                            model.register_restored_claude_session(tv_id, reg_id, cwd, ctx);
+                        });
+                        format!("claude --resume {id}")
                     } else {
                         "claude --continue".to_string()
                     };

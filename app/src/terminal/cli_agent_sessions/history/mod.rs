@@ -190,6 +190,42 @@ pub fn claude_projects_dir() -> Option<PathBuf> {
 /// It is deliberately not a valid session-id/UUID so it can never collide with one.
 pub const CLAUDE_CONTINUE_SENTINEL: &str = "__warp_claude_continue__";
 
+/// Resumable Claude conversation ids for `cwd`, newest-modified first. Used to
+/// assign a restored tab a concrete, distinct conversation when its exact id was
+/// lost (so multiple tabs don't all collapse onto the same `--continue`
+/// conversation). Claude stores each project's transcripts in a directory whose
+/// name is the cwd with every non-alphanumeric character replaced by `-`.
+pub fn session_ids_for_cwd(cwd: &str) -> Vec<String> {
+    let Some(root) = claude_projects_dir() else {
+        return Vec::new();
+    };
+    let encoded: String = cwd
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let Ok(entries) = std::fs::read_dir(root.join(encoded)) else {
+        return Vec::new();
+    };
+    let mut sessions: Vec<(std::time::SystemTime, String)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                return None;
+            }
+            let stem = path.file_stem()?.to_str()?.to_owned();
+            // Skip subagent Task transcripts — not top-level resumable sessions.
+            if stem.starts_with("agent-") {
+                return None;
+            }
+            let mtime = entry.metadata().ok()?.modified().ok()?;
+            Some((mtime, stem))
+        })
+        .collect();
+    sessions.sort_by(|a, b| b.0.cmp(&a.0));
+    sessions.into_iter().map(|(_, id)| id).collect()
+}
+
 /// True if a resumable Claude session transcript named `<id>.jsonl` exists under
 /// any project directory in the Claude store. Used to guard `claude --resume <id>`
 /// on tab restore so a stale, deleted, or never-persisted ("phantom") session id
