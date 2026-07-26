@@ -437,6 +437,8 @@ fn enabled_features() -> HashSet<FeatureFlag> {
         FeatureFlag::DirectoryTabColors,
         #[cfg(feature = "custom_tab_colors")]
         FeatureFlag::CustomTabColors,
+        #[cfg(feature = "claude_auto_tab_colors")]
+        FeatureFlag::ClaudeAutoTabColors,
         #[cfg(feature = "open_warp_new_settings_modes")]
         FeatureFlag::OpenWarpNewSettingsModes,
         #[cfg(feature = "hoa_code_review")]

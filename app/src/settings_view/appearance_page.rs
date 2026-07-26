@@ -10,10 +10,11 @@ use warp_core::ui::theme::color::internal_colors;
 use warp_errors::{report_error, report_if_error};
 use warp_util::path::user_friendly_path;
 use warpui::elements::{
-    Align, Border, ChildView, Clipped, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
-    Dismiss, Element, Empty, Fill, Flex, FormattedTextElement, Hoverable, MainAxisAlignment,
-    MainAxisSize, MouseStateHandle, ParentElement, Radius, Shrinkable, Text, Wrap,
-    DEFAULT_UI_LINE_HEIGHT_RATIO,
+    Align, Border, ChildAnchor, ChildView, Clipped, ConstrainedBox, Container, CornerRadius,
+    CrossAxisAlignment, Dismiss, Element, Empty, Fill, Flex, FormattedTextElement, Hoverable,
+    MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning, ParentElement,
+    PositionedElementAnchor, PositionedElementOffsetBounds, Radius, SavePosition, Shrinkable, Stack,
+    Text, Wrap, DEFAULT_UI_LINE_HEIGHT_RATIO,
 };
 use warpui::fonts::{FamilyId, FontInfo, Weight};
 use warpui::keymap::{ContextPredicate, FixedBinding};
@@ -32,6 +33,7 @@ use warpui::{
     View, ViewContext, ViewHandle, WindowId,
 };
 
+use super::color_picker_popover::{ColorPickerPopover, ColorPickerPopoverEvent};
 use super::directory_color_add_picker::{DirectoryColorAddPicker, DirectoryColorAddPickerEvent};
 use super::settings_page::{
     build_reset_button, render_body_item, render_body_item_label, render_dropdown_item,
@@ -84,9 +86,9 @@ use crate::ui_components::color_dot::{render_color_dot, TAB_COLOR_OPTIONS};
 use crate::ui_components::icons::Icon;
 use crate::user_config::WarpConfig;
 use crate::util::bindings;
-use crate::view_components::action_button::{ActionButton, ButtonSize, NakedTheme};
+use crate::view_components::action_button::{ActionButton, ButtonSize, NakedTheme, SecondaryTheme};
 use crate::view_components::{
-    Dropdown, DropdownItem, FilterableDropdown, SubmittableTextInput, SubmittableTextInputEvent,
+    Dropdown, DropdownItem, FilterableDropdown,
 };
 use warp_core::ui::color::hex_color::{coloru_from_hex_string, coloru_to_hex_string};
 use crate::window_settings::{
@@ -95,11 +97,11 @@ use crate::window_settings::{
 };
 use crate::workspace::header_toolbar_editor::HeaderToolbarInlineEditor;
 use crate::workspace::tab_settings::{
-    canonical_directory_key, DirectoryTabColor, HideTitleBarSearchBarInVerticalTabs,
-    PreserveActiveTabColor, ShowCodeReviewButton, ShowIndicatorsButton,
-    ShowVerticalTabPanelInRestoredWindows, TabCloseButtonPosition, TabSettings,
-    TabSettingsChangedEvent, UseLatestUserPromptAsConversationTitleInTabNames, UseVerticalTabs,
-    WorkspaceDecorationVisibility,
+    canonical_directory_key, ClaudeAutoColorRule, DirectoryTabColor,
+    HideTitleBarSearchBarInVerticalTabs, PreserveActiveTabColor, ShowCodeReviewButton,
+    ShowIndicatorsButton, ShowVerticalTabPanelInRestoredWindows, TabCloseButtonPosition,
+    TabSettings, TabSettingsChangedEvent, UseLatestUserPromptAsConversationTitleInTabNames,
+    UseVerticalTabs, WorkspaceDecorationVisibility,
 };
 use crate::workspace::WorkspaceAction;
 use crate::{send_telemetry_from_ctx, themes};
@@ -550,7 +552,26 @@ pub enum AppearancePageAction {
     RemoveDefaultDirectoryTabColor {
         path: PathBuf,
     },
-    RemoveCustomTabColor(usize),
+    /// Opens the shared color-picker popover for the given target.
+    OpenColorPicker(ColorPickerTarget),
+    /// Add or update a Claude auto-color rule from the inline form.
+    ClaudeRuleSubmit,
+    /// Load an existing rule into the inline form for editing.
+    ClaudeRuleEdit(usize),
+    ClaudeRuleDelete(usize),
+    ClaudeRuleCancelEdit,
+    ToggleClaudeAutoTabColors,
+}
+
+/// What the shared [`ColorPickerPopover`] is currently editing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorPickerTarget {
+    /// Adding a new color to the custom tab color palette.
+    AddPaletteColor,
+    /// Editing (or removing) the palette color at this index.
+    EditPaletteColor(usize),
+    /// Choosing the color of the Claude auto-color rule form.
+    RuleFormColor,
 }
 
 pub struct AppearanceSettingsPageView {
@@ -585,6 +606,23 @@ pub struct AppearanceSettingsPageView {
     color_picker_dot_states: Vec<Vec<MouseStateHandle>>,
     directory_tab_color_delete_buttons: Vec<ViewHandle<ActionButton>>,
     custom_tab_color_swatch_states: Vec<MouseStateHandle>,
+    /// Shared HSV color-picker popover (custom palette + Claude rule form).
+    custom_color_picker: ViewHandle<ColorPickerPopover>,
+    /// What the popover is editing; `None` when closed.
+    color_picker_target: Option<ColorPickerTarget>,
+    custom_color_add_button: ViewHandle<ActionButton>,
+    /// Claude auto tab colors: inline rule form state.
+    claude_rule_name_editor: ViewHandle<EditorView>,
+    claude_rule_keywords_editor: ViewHandle<EditorView>,
+    claude_rule_form_color: String,
+    /// `Some(index)` while the form is editing an existing rule.
+    claude_rule_editing: Option<usize>,
+    claude_rule_form_swatch_state: MouseStateHandle,
+    claude_rule_swatch_states: Vec<MouseStateHandle>,
+    claude_rule_edit_buttons: Vec<ViewHandle<ActionButton>>,
+    claude_rule_delete_buttons: Vec<ViewHandle<ActionButton>>,
+    claude_rule_submit_button: ViewHandle<ActionButton>,
+    claude_rule_cancel_button: ViewHandle<ActionButton>,
     header_toolbar_inline_editor: ViewHandle<HeaderToolbarInlineEditor>,
 
     /// The context chip renderers based on the most recently
@@ -796,14 +834,14 @@ impl TypedActionView for AppearanceSettingsPageView {
                 });
                 ctx.notify();
             }
-            RemoveCustomTabColor(index) => {
-                let index = *index;
+            OpenColorPicker(target) => self.open_color_picker(*target, ctx),
+            ClaudeRuleSubmit => self.submit_claude_rule_form(ctx),
+            ClaudeRuleEdit(index) => self.edit_claude_rule(*index, ctx),
+            ClaudeRuleDelete(index) => self.delete_claude_rule(*index, ctx),
+            ClaudeRuleCancelEdit => self.cancel_claude_rule_edit(ctx),
+            ToggleClaudeAutoTabColors => {
                 TabSettings::handle(ctx).update(ctx, |settings, ctx| {
-                    let new_value = settings
-                        .custom_tab_color_palette
-                        .value()
-                        .without_index(index);
-                    let _ = settings.custom_tab_color_palette.set_value(new_value, ctx);
+                    report_if_error!(settings.claude_auto_tab_colors.toggle_and_save_value(ctx));
                 });
                 ctx.notify();
             }
@@ -1330,6 +1368,49 @@ impl AppearanceSettingsPageView {
         let header_toolbar_inline_editor =
             ctx.add_typed_action_view(HeaderToolbarInlineEditor::new);
 
+        let custom_color_picker = ctx.add_typed_action_view(ColorPickerPopover::new);
+        ctx.subscribe_to_view(&custom_color_picker, |me, _, event, ctx| {
+            me.handle_color_picker_event(event, ctx);
+        });
+        let custom_color_add_button = ctx.add_typed_action_view(|_| {
+            ActionButton::new("+ Add color", SecondaryTheme).on_click(|ctx| {
+                ctx.dispatch_typed_action(AppearancePageAction::OpenColorPicker(
+                    ColorPickerTarget::AddPaletteColor,
+                ));
+            })
+        });
+
+        let rule_editor_options = SingleLineEditorOptions {
+            text: TextOptions::ui_font_size(appearance_handle.as_ref(ctx)),
+            ..Default::default()
+        };
+        let claude_rule_name_editor = {
+            let options = rule_editor_options.clone();
+            ctx.add_typed_action_view(|ctx| {
+                let mut editor = EditorView::single_line(options, ctx);
+                editor.set_placeholder_text("Client or project", ctx);
+                editor
+            })
+        };
+        let claude_rule_keywords_editor = {
+            let options = rule_editor_options;
+            ctx.add_typed_action_view(|ctx| {
+                let mut editor = EditorView::single_line(options, ctx);
+                editor.set_placeholder_text("keywords, comma, separated", ctx);
+                editor
+            })
+        };
+        let claude_rule_submit_button = ctx.add_typed_action_view(|_| {
+            ActionButton::new("Save rule", SecondaryTheme).on_click(|ctx| {
+                ctx.dispatch_typed_action(AppearancePageAction::ClaudeRuleSubmit);
+            })
+        });
+        let claude_rule_cancel_button = ctx.add_typed_action_view(|_| {
+            ActionButton::new("Cancel", NakedTheme).on_click(|ctx| {
+                ctx.dispatch_typed_action(AppearancePageAction::ClaudeRuleCancelEdit);
+            })
+        });
+
         AppearanceSettingsPageView {
             page: Self::build_page(ctx),
             window_id: ctx.window_id(),
@@ -1370,6 +1451,24 @@ impl AppearanceSettingsPageView {
             custom_tab_color_swatch_states: (0..custom_tab_colors(ctx).len())
                 .map(|_| MouseStateHandle::default())
                 .collect(),
+            custom_color_picker,
+            color_picker_target: None,
+            custom_color_add_button,
+            claude_rule_name_editor,
+            claude_rule_keywords_editor,
+            claude_rule_form_color: "#502fef".to_string(),
+            claude_rule_editing: None,
+            claude_rule_form_swatch_state: MouseStateHandle::default(),
+            claude_rule_swatch_states: (0..claude_auto_color_rules(ctx).len())
+                .map(|_| MouseStateHandle::default())
+                .collect(),
+            claude_rule_edit_buttons: build_claude_rule_buttons(ctx, ClaudeRuleButtonKind::Edit),
+            claude_rule_delete_buttons: build_claude_rule_buttons(
+                ctx,
+                ClaudeRuleButtonKind::Delete,
+            ),
+            claude_rule_submit_button,
+            claude_rule_cancel_button,
             header_toolbar_inline_editor,
             alt_screen_padding_editor,
             context_chips,
@@ -1567,19 +1666,11 @@ impl AppearanceSettingsPageView {
         }
 
         if FeatureFlag::CustomTabColors.is_enabled() {
-            let input = ctx.add_typed_action_view(|ctx| {
-                let mut input = SubmittableTextInput::new(ctx)
-                    .validate_on_edit(|s| coloru_from_hex_string(s.trim()).is_ok());
-                input.set_placeholder_text("#502fef", ctx);
-                input.set_outer_margins(0., 0., ctx);
-                input
-            });
-            ctx.subscribe_to_view(&input, |me, _, event, ctx| {
-                if let SubmittableTextInputEvent::Submit(hex) = event {
-                    me.add_custom_tab_color(hex, ctx);
-                }
-            });
-            tab_settings_widgets.push(Box::new(CustomTabColorsWidget { input }));
+            tab_settings_widgets.push(Box::new(CustomTabColorsWidget));
+        }
+
+        if FeatureFlag::ClaudeAutoTabColors.is_enabled() {
+            tab_settings_widgets.push(Box::new(ClaudeAutoColorsWidget::default()));
         }
 
         categories.push(Category::new("Tabs", tab_settings_widgets));
@@ -2696,15 +2787,36 @@ impl AppearanceSettingsPageView {
             let count = custom_tab_colors(ctx).len();
             self.custom_tab_color_swatch_states
                 .resize_with(count, MouseStateHandle::default);
+            // Editing a palette index that no longer exists would misfire.
+            if let Some(ColorPickerTarget::EditPaletteColor(index)) = self.color_picker_target {
+                if index >= count {
+                    self.color_picker_target = None;
+                }
+            }
+        }
+        if let TabSettingsChangedEvent::ClaudeAutoColorRules { .. } = event {
+            let count = claude_auto_color_rules(ctx).len();
+            self.claude_rule_swatch_states
+                .resize_with(count, MouseStateHandle::default);
+            self.claude_rule_edit_buttons =
+                build_claude_rule_buttons(ctx, ClaudeRuleButtonKind::Edit);
+            self.claude_rule_delete_buttons =
+                build_claude_rule_buttons(ctx, ClaudeRuleButtonKind::Delete);
+        }
+        if let TabSettingsChangedEvent::ClaudeAutoTabColors { .. } = event {
+            // The rule form (and its open picker) disappears with the toggle.
+            if !claude_auto_colors_enabled(ctx)
+                && self.color_picker_target == Some(ColorPickerTarget::RuleFormColor)
+            {
+                self.color_picker_target = None;
+            }
         }
         ctx.notify();
     }
 
     /// Appends a custom hex color to the palette, canonicalized to `#rrggbb`.
     fn add_custom_tab_color(&mut self, hex: &str, ctx: &mut ViewContext<Self>) {
-        let canonical = coloru_from_hex_string(hex.trim())
-            .map(|color| coloru_to_hex_string(&color))
-            .unwrap_or_else(|_| hex.trim().to_lowercase());
+        let canonical = canonical_hex(hex);
         TabSettings::handle(ctx).update(ctx, |settings, ctx| {
             let new_value = settings
                 .custom_tab_color_palette
@@ -2713,6 +2825,161 @@ impl AppearanceSettingsPageView {
             let _ = settings.custom_tab_color_palette.set_value(new_value, ctx);
         });
         ctx.notify();
+    }
+
+    /// Opens the shared color-picker popover for `target`, seeding it with the
+    /// color it is editing.
+    fn open_color_picker(&mut self, target: ColorPickerTarget, ctx: &mut ViewContext<Self>) {
+        let initial = match target {
+            ColorPickerTarget::AddPaletteColor => None,
+            ColorPickerTarget::EditPaletteColor(index) => custom_tab_colors(ctx).get(index).cloned(),
+            ColorPickerTarget::RuleFormColor => Some(self.claude_rule_form_color.clone()),
+        };
+        let allow_remove = matches!(target, ColorPickerTarget::EditPaletteColor(_));
+        self.custom_color_picker.update(ctx, |picker, ctx| {
+            picker.open_with(initial.as_deref(), allow_remove, ctx);
+        });
+        self.color_picker_target = Some(target);
+        ctx.notify();
+    }
+
+    fn handle_color_picker_event(
+        &mut self,
+        event: &ColorPickerPopoverEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(target) = self.color_picker_target else {
+            return;
+        };
+        match event {
+            ColorPickerPopoverEvent::Submitted(hex) => {
+                match target {
+                    ColorPickerTarget::AddPaletteColor => {
+                        self.add_custom_tab_color(hex, ctx);
+                    }
+                    ColorPickerTarget::EditPaletteColor(index) => {
+                        let canonical = canonical_hex(hex);
+                        TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                            let new_value = settings
+                                .custom_tab_color_palette
+                                .value()
+                                .with_replaced(index, &canonical);
+                            let _ = settings.custom_tab_color_palette.set_value(new_value, ctx);
+                        });
+                    }
+                    ColorPickerTarget::RuleFormColor => {
+                        self.claude_rule_form_color = canonical_hex(hex);
+                    }
+                }
+                self.color_picker_target = None;
+                ctx.notify();
+            }
+            ColorPickerPopoverEvent::RemoveRequested => {
+                if let ColorPickerTarget::EditPaletteColor(index) = target {
+                    TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                        let new_value = settings
+                            .custom_tab_color_palette
+                            .value()
+                            .without_index(index);
+                        let _ = settings.custom_tab_color_palette.set_value(new_value, ctx);
+                    });
+                }
+                self.color_picker_target = None;
+                ctx.notify();
+            }
+            ColorPickerPopoverEvent::DismissRequested => {
+                self.color_picker_target = None;
+                ctx.notify();
+            }
+        }
+    }
+
+    /// Adds or updates a Claude auto-color rule from the inline form. Requires
+    /// at least one non-empty keyword; the name falls back to the first
+    /// keyword when left blank.
+    fn submit_claude_rule_form(&mut self, ctx: &mut ViewContext<Self>) {
+        let name = self
+            .claude_rule_name_editor
+            .as_ref(ctx)
+            .buffer_text(ctx)
+            .trim()
+            .to_string();
+        let keywords = self
+            .claude_rule_keywords_editor
+            .as_ref(ctx)
+            .buffer_text(ctx)
+            .trim()
+            .to_string();
+        let Some(first_keyword) = keywords
+            .split(',')
+            .map(str::trim)
+            .find(|keyword| !keyword.is_empty())
+            .map(str::to_string)
+        else {
+            return;
+        };
+        let rule = ClaudeAutoColorRule {
+            name: if name.is_empty() { first_keyword } else { name },
+            keywords,
+            color: self.claude_rule_form_color.clone(),
+        };
+
+        let editing = self.claude_rule_editing;
+        TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+            let rules = settings.claude_auto_color_rules.value();
+            let new_value = match editing {
+                Some(index) => rules.with_replaced(index, rule),
+                None => rules.with_added(rule),
+            };
+            let _ = settings.claude_auto_color_rules.set_value(new_value, ctx);
+        });
+        self.clear_claude_rule_form(ctx);
+        ctx.notify();
+    }
+
+    fn edit_claude_rule(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        let rules = claude_auto_color_rules(ctx);
+        let Some(rule) = rules.get(index) else {
+            return;
+        };
+        let (name, keywords, color) = (rule.name.clone(), rule.keywords.clone(), rule.color.clone());
+        self.claude_rule_name_editor.update(ctx, |editor, ctx| {
+            editor.system_reset_buffer_text(&name, ctx);
+        });
+        self.claude_rule_keywords_editor.update(ctx, |editor, ctx| {
+            editor.system_reset_buffer_text(&keywords, ctx);
+        });
+        self.claude_rule_form_color = color;
+        self.claude_rule_editing = Some(index);
+        ctx.notify();
+    }
+
+    fn delete_claude_rule(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+            let new_value = settings.claude_auto_color_rules.value().without_index(index);
+            let _ = settings.claude_auto_color_rules.set_value(new_value, ctx);
+        });
+        match self.claude_rule_editing {
+            Some(editing) if editing == index => self.clear_claude_rule_form(ctx),
+            Some(editing) if editing > index => self.claude_rule_editing = Some(editing - 1),
+            _ => {}
+        }
+        ctx.notify();
+    }
+
+    fn cancel_claude_rule_edit(&mut self, ctx: &mut ViewContext<Self>) {
+        self.clear_claude_rule_form(ctx);
+        ctx.notify();
+    }
+
+    fn clear_claude_rule_form(&mut self, ctx: &mut ViewContext<Self>) {
+        self.claude_rule_name_editor.update(ctx, |editor, ctx| {
+            editor.system_reset_buffer_text("", ctx);
+        });
+        self.claude_rule_keywords_editor.update(ctx, |editor, ctx| {
+            editor.system_reset_buffer_text("", ctx);
+        });
+        self.claude_rule_editing = None;
     }
 
     fn toggle_ligature_rendering(&mut self, ctx: &mut ViewContext<Self>) {
@@ -5277,17 +5544,113 @@ fn custom_tab_colors(app: &AppContext) -> Vec<String> {
         .to_vec()
 }
 
-/// Settings widget: lets the user add/remove custom hex colors that show up in
-/// the tab color picker alongside the built-in ANSI colors.
-struct CustomTabColorsWidget {
-    input: ViewHandle<SubmittableTextInput>,
+/// The user's configured Claude auto-color rules, in priority order.
+fn claude_auto_color_rules(app: &AppContext) -> Vec<ClaudeAutoColorRule> {
+    TabSettings::as_ref(app)
+        .claude_auto_color_rules
+        .value()
+        .rules()
+        .to_vec()
 }
+
+/// True when Claude-conversation auto tab coloring is on (flag + setting).
+fn claude_auto_colors_enabled(app: &AppContext) -> bool {
+    FeatureFlag::ClaudeAutoTabColors.is_enabled()
+        && *TabSettings::as_ref(app).claude_auto_tab_colors.value()
+}
+
+/// Canonicalizes a hex color to lowercase `#rrggbb` (best-effort for
+/// unparsable input, which downstream consumers skip anyway).
+fn canonical_hex(hex: &str) -> String {
+    coloru_from_hex_string(hex.trim())
+        .map(|color| coloru_to_hex_string(&color))
+        .unwrap_or_else(|_| hex.trim().to_lowercase())
+}
+
+#[derive(Clone, Copy)]
+enum ClaudeRuleButtonKind {
+    Edit,
+    Delete,
+}
+
+/// Per-rule Edit/Delete buttons, rebuilt whenever the rules setting changes.
+fn build_claude_rule_buttons(
+    ctx: &mut ViewContext<AppearanceSettingsPageView>,
+    kind: ClaudeRuleButtonKind,
+) -> Vec<ViewHandle<ActionButton>> {
+    (0..claude_auto_color_rules(ctx).len())
+        .map(|index| {
+            ctx.add_typed_action_view(move |_| match kind {
+                ClaudeRuleButtonKind::Edit => ActionButton::new("", NakedTheme)
+                    .with_icon(Icon::Pencil)
+                    .with_size(ButtonSize::XSmall)
+                    .on_click(move |ctx| {
+                        ctx.dispatch_typed_action(AppearancePageAction::ClaudeRuleEdit(index));
+                    }),
+                ClaudeRuleButtonKind::Delete => ActionButton::new("", NakedTheme)
+                    .with_icon(Icon::X)
+                    .with_size(ButtonSize::XSmall)
+                    .on_click(move |ctx| {
+                        ctx.dispatch_typed_action(AppearancePageAction::ClaudeRuleDelete(index));
+                    }),
+            })
+        })
+        .collect()
+}
+
+/// Wraps `anchor_content` in a stack that shows the shared color-picker
+/// popover anchored below it while `open` is true.
+fn with_color_picker_overlay(
+    view: &AppearanceSettingsPageView,
+    anchor_content: Box<dyn Element>,
+    anchor_id: &str,
+    open: bool,
+) -> Box<dyn Element> {
+    let mut stack = Stack::new();
+    stack.add_child(SavePosition::new(anchor_content, anchor_id).finish());
+    if open {
+        stack.add_positioned_overlay_child(
+            ChildView::new(&view.custom_color_picker).finish(),
+            OffsetPositioning::offset_from_save_position_element(
+                anchor_id,
+                warpui::geometry::vector::vec2f(0., 6.),
+                PositionedElementOffsetBounds::WindowByPosition,
+                PositionedElementAnchor::BottomLeft,
+                ChildAnchor::TopLeft,
+            ),
+        );
+    }
+    stack.finish()
+}
+
+/// A bordered single-line input box, styled to match the settings inputs.
+fn render_rule_input_box(
+    editor: &ViewHandle<EditorView>,
+    width: f32,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    let theme = appearance.theme();
+    Container::new(
+        ConstrainedBox::new(ChildView::new(editor).finish())
+            .with_width(width)
+            .finish(),
+    )
+    .with_horizontal_padding(6.)
+    .with_vertical_padding(3.)
+    .with_border(Border::all(1.).with_border_fill(theme.outline()))
+    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(5.)))
+    .finish()
+}
+
+/// Settings widget: manage the custom tab color palette. Swatches open the
+/// color picker to edit/remove; the add button opens it for a new color.
+struct CustomTabColorsWidget;
 
 impl SettingsWidget for CustomTabColorsWidget {
     type View = AppearanceSettingsPageView;
 
     fn search_terms(&self) -> &str {
-        "custom tab color hex palette swatch"
+        "custom tab color hex palette swatch picker"
     }
 
     fn render(
@@ -5313,7 +5676,7 @@ impl SettingsWidget for CustomTabColorsWidget {
             )
             .with_child(
                 Text::new(
-                    "Add your own colors to the tab color picker. Enter a hex code like #502fef.",
+                    "Create your own colors for the tab color picker. Click a swatch to edit or remove it.",
                     appearance.ui_font_family(),
                     appearance.ui_font_size(),
                 )
@@ -5323,44 +5686,229 @@ impl SettingsWidget for CustomTabColorsWidget {
             .finish();
         content.add_child(header);
 
-        // Existing custom colors: a row of swatches. Clicking a swatch removes it.
+        // Swatch strip + add button; the picker popover anchors underneath.
         let colors = custom_tab_colors(app);
-        if !colors.is_empty() {
-            let mut swatches = Flex::row()
-                .with_spacing(8.)
-                .with_cross_axis_alignment(CrossAxisAlignment::Center);
-            for (idx, hex) in colors.iter().enumerate() {
-                let Some(mouse_state) = view.custom_tab_color_swatch_states.get(idx).cloned() else {
-                    continue;
-                };
-                let dot_color = coloru_from_hex_string(hex)
-                    .unwrap_or_else(|_| pathfinder_color::ColorU::transparent_black());
-                swatches.add_child(
-                    render_color_dot(
-                        mouse_state,
-                        dot_color,
-                        false,
-                        theme.accent().into(),
-                        false,
-                        theme.foreground(),
-                        format!("Remove {hex}"),
-                        appearance,
-                    )
-                    .on_click(move |ctx, _, _| {
-                        ctx.dispatch_typed_action(AppearancePageAction::RemoveCustomTabColor(idx));
-                    })
-                    .finish(),
-                );
-            }
-            content.add_child(swatches.finish());
+        let mut swatches = Flex::row()
+            .with_spacing(8.)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center);
+        for (idx, hex) in colors.iter().enumerate() {
+            let Some(mouse_state) = view.custom_tab_color_swatch_states.get(idx).cloned() else {
+                continue;
+            };
+            let dot_color = coloru_from_hex_string(hex)
+                .unwrap_or_else(|_| pathfinder_color::ColorU::transparent_black());
+            let is_being_edited =
+                view.color_picker_target == Some(ColorPickerTarget::EditPaletteColor(idx));
+            swatches.add_child(
+                render_color_dot(
+                    mouse_state,
+                    dot_color,
+                    is_being_edited,
+                    theme.accent().into(),
+                    false,
+                    theme.foreground(),
+                    format!("Edit {hex}"),
+                    appearance,
+                )
+                .on_click(move |ctx, _, _| {
+                    ctx.dispatch_typed_action(AppearancePageAction::OpenColorPicker(
+                        ColorPickerTarget::EditPaletteColor(idx),
+                    ));
+                })
+                .finish(),
+            );
         }
+        swatches.add_child(ChildView::new(&view.custom_color_add_button).finish());
 
-        // Hex input to add a new color (submits on Enter or the embedded button).
+        let picker_open = matches!(
+            view.color_picker_target,
+            Some(ColorPickerTarget::AddPaletteColor | ColorPickerTarget::EditPaletteColor(_))
+        );
+        content.add_child(with_color_picker_overlay(
+            view,
+            swatches.finish(),
+            "custom-tab-colors-picker-anchor",
+            picker_open,
+        ));
+
+        content.finish()
+    }
+}
+
+/// Settings widget: Claude-conversation auto tab coloring — enable toggle,
+/// keyword rules list, and an inline add/edit form.
+#[derive(Default)]
+struct ClaudeAutoColorsWidget {
+    switch_state: SwitchStateHandle,
+}
+
+impl SettingsWidget for ClaudeAutoColorsWidget {
+    type View = AppearanceSettingsPageView;
+
+    fn search_terms(&self) -> &str {
+        "claude conversation auto color tab keyword rule client project automatic"
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let enabled = claude_auto_colors_enabled(app);
+        let mut content = Flex::column().with_spacing(8.);
+
+        let header_text = Flex::column()
+            .with_spacing(4.)
+            .with_child(
+                Text::new(
+                    "Auto-color tabs from Claude conversations",
+                    appearance.ui_font_family(),
+                    appearance.ui_font_size(),
+                )
+                .with_color(theme.active_ui_text_color().into())
+                .soft_wrap(false)
+                .finish(),
+            )
+            .with_child(
+                Text::new(
+                    "Colors a tab once from the first prompt of the Claude conversation running in it, using your keyword rules. Manual colors always win. Directory tab colors are inactive while this is on.",
+                    appearance.ui_font_family(),
+                    appearance.ui_font_size(),
+                )
+                .with_color(theme.nonactive_ui_text_color().into())
+                .finish(),
+            )
+            .finish();
         content.add_child(
-            ConstrainedBox::new(ChildView::new(&self.input).finish())
-                .with_width(220.)
+            Flex::row()
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_cross_axis_alignment(CrossAxisAlignment::Start)
+                .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+                .with_child(Shrinkable::new(1., header_text).finish())
+                .with_child(
+                    appearance
+                        .ui_builder()
+                        .switch(self.switch_state.clone())
+                        .check(enabled)
+                        .build()
+                        .on_click(move |ctx, _, _| {
+                            ctx.dispatch_typed_action(
+                                AppearancePageAction::ToggleClaudeAutoTabColors,
+                            );
+                        })
+                        .finish(),
+                )
                 .finish(),
         );
+
+        if !enabled {
+            return content.finish();
+        }
+
+        // Existing rules.
+        for (idx, rule) in claude_auto_color_rules(app).into_iter().enumerate() {
+            let Some(swatch_state) = view.claude_rule_swatch_states.get(idx).cloned() else {
+                continue;
+            };
+            let dot_color = coloru_from_hex_string(&rule.color)
+                .unwrap_or_else(|_| pathfinder_color::ColorU::transparent_black());
+            let mut row = Flex::row()
+                .with_spacing(8.)
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center);
+            row.add_child(
+                render_color_dot(
+                    swatch_state,
+                    dot_color,
+                    view.claude_rule_editing == Some(idx),
+                    theme.accent().into(),
+                    false,
+                    theme.foreground(),
+                    rule.color.clone(),
+                    appearance,
+                )
+                .finish(),
+            );
+            row.add_child(
+                Text::new(
+                    rule.name.clone(),
+                    appearance.ui_font_family(),
+                    appearance.ui_font_size(),
+                )
+                .with_color(theme.active_ui_text_color().into())
+                .soft_wrap(false)
+                .finish(),
+            );
+            row.add_child(
+                Shrinkable::new(
+                    1.,
+                    Text::new(
+                        rule.keywords.clone(),
+                        appearance.ui_font_family(),
+                        appearance.ui_font_size(),
+                    )
+                    .with_color(theme.nonactive_ui_text_color().into())
+                    .soft_wrap(false)
+                    .finish(),
+                )
+                .finish(),
+            );
+            if let Some(edit_button) = view.claude_rule_edit_buttons.get(idx) {
+                row.add_child(ChildView::new(edit_button).finish());
+            }
+            if let Some(delete_button) = view.claude_rule_delete_buttons.get(idx) {
+                row.add_child(ChildView::new(delete_button).finish());
+            }
+            content.add_child(row.finish());
+        }
+
+        // Inline add/edit form: color swatch, name, keywords, save (+ cancel).
+        let form_color = coloru_from_hex_string(&view.claude_rule_form_color)
+            .unwrap_or_else(|_| pathfinder_color::ColorU::transparent_black());
+        let mut form = Flex::row()
+            .with_spacing(8.)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center);
+        form.add_child(
+            render_color_dot(
+                view.claude_rule_form_swatch_state.clone(),
+                form_color,
+                view.color_picker_target == Some(ColorPickerTarget::RuleFormColor),
+                theme.accent().into(),
+                false,
+                theme.foreground(),
+                "Rule color".to_string(),
+                appearance,
+            )
+            .on_click(move |ctx, _, _| {
+                ctx.dispatch_typed_action(AppearancePageAction::OpenColorPicker(
+                    ColorPickerTarget::RuleFormColor,
+                ));
+            })
+            .finish(),
+        );
+        form.add_child(render_rule_input_box(
+            &view.claude_rule_name_editor,
+            150.,
+            appearance,
+        ));
+        form.add_child(render_rule_input_box(
+            &view.claude_rule_keywords_editor,
+            220.,
+            appearance,
+        ));
+        form.add_child(ChildView::new(&view.claude_rule_submit_button).finish());
+        if view.claude_rule_editing.is_some() {
+            form.add_child(ChildView::new(&view.claude_rule_cancel_button).finish());
+        }
+
+        content.add_child(with_color_picker_overlay(
+            view,
+            form.finish(),
+            "claude-rule-color-picker-anchor",
+            view.color_picker_target == Some(ColorPickerTarget::RuleFormColor),
+        ));
 
         content.finish()
     }
@@ -5400,7 +5948,11 @@ impl SettingsWidget for DirectoryTabColorsWidget {
             )
             .with_child(
                 Text::new(
-                    "Automatically color tabs based on the directory or repo you're working in.",
+                    if claude_auto_colors_enabled(app) {
+                        "Inactive while \"Auto-color tabs from Claude conversations\" is enabled — turn that off to use directory-based colors."
+                    } else {
+                        "Automatically color tabs based on the directory or repo you're working in."
+                    },
                     appearance.ui_font_family(),
                     appearance.ui_font_size(),
                 )

@@ -294,6 +294,117 @@ impl CustomTabColorPalette {
         }
         Self(colors)
     }
+
+    /// Returns a new palette with the color at `index` replaced by `hex`
+    /// (normalized to lowercase). A no-op when out of range; removes the entry
+    /// instead if the new value would duplicate another existing color.
+    pub fn with_replaced(&self, index: usize, hex: &str) -> Self {
+        let normalized = hex.trim().to_lowercase();
+        let mut colors = self.0.clone();
+        if index >= colors.len() {
+            return Self(colors);
+        }
+        let duplicate_elsewhere = colors
+            .iter()
+            .enumerate()
+            .any(|(i, c)| i != index && c.eq_ignore_ascii_case(&normalized));
+        if duplicate_elsewhere {
+            colors.remove(index);
+        } else {
+            colors[index] = normalized;
+        }
+        Self(colors)
+    }
+}
+
+/// One keyword rule for automatically coloring tabs from the content of a
+/// Claude Code conversation. `keywords` is a comma-separated list as typed by
+/// the user; matching is case-insensitive and word-boundary-aware (substring
+/// for multi-word phrases).
+#[derive(
+    Default,
+    Debug,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Eq,
+    schemars::JsonSchema,
+    settings_value::SettingsValue,
+)]
+#[schemars(description = "A keyword rule mapping Claude conversation content to a tab color.")]
+pub struct ClaudeAutoColorRule {
+    /// Display label for the rule (e.g. a client or project name).
+    pub name: String,
+    /// Comma-separated keywords that identify this client/project.
+    pub keywords: String,
+    /// Tab color applied on match, as a `#rrggbb` hex string.
+    pub color: String,
+}
+
+/// User-defined rules for automatically coloring tabs based on the first
+/// prompt of the Claude Code conversation running in the tab. Evaluated in
+/// order; the rule with the most keyword hits wins (ties go to the earliest
+/// rule).
+#[derive(
+    Default,
+    Debug,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Eq,
+    schemars::JsonSchema,
+    settings_value::SettingsValue,
+)]
+#[schemars(description = "Keyword rules for auto-coloring tabs from Claude conversations.")]
+pub struct ClaudeAutoColorRules(pub(crate) Vec<ClaudeAutoColorRule>);
+
+settings::macros::implement_setting_for_enum!(
+    ClaudeAutoColorRules,
+    TabSettings,
+    SupportedPlatforms::ALL,
+    SyncToCloud::Never,
+    surface: settings::SettingSurfaces::GUI,
+    private: false,
+    toml_path: "appearance.tabs.claude_auto_color_rules",
+    max_table_depth: 0,
+    description: "Keyword rules for auto-coloring tabs from Claude conversations.",
+    feature_flag: warp_core::features::FeatureFlag::ClaudeAutoTabColors,
+);
+
+impl ClaudeAutoColorRules {
+    /// The configured rules, in priority order.
+    pub fn rules(&self) -> &[ClaudeAutoColorRule] {
+        &self.0
+    }
+
+    /// Returns a new value with `rule` appended.
+    pub fn with_added(&self, rule: ClaudeAutoColorRule) -> Self {
+        let mut rules = self.0.clone();
+        rules.push(rule);
+        Self(rules)
+    }
+
+    /// Returns a new value with the rule at `index` replaced (a no-op when out
+    /// of range).
+    pub fn with_replaced(&self, index: usize, rule: ClaudeAutoColorRule) -> Self {
+        let mut rules = self.0.clone();
+        if index < rules.len() {
+            rules[index] = rule;
+        }
+        Self(rules)
+    }
+
+    /// Returns a new value with the rule at `index` removed (a no-op when out
+    /// of range).
+    pub fn without_index(&self, index: usize) -> Self {
+        let mut rules = self.0.clone();
+        if index < rules.len() {
+            rules.remove(index);
+        }
+        Self(rules)
+    }
 }
 
 #[derive(
@@ -637,6 +748,18 @@ define_settings_group!(TabSettings, settings: [
     close_button_position: TabCloseButtonPosition,
     directory_tab_colors: DirectoryTabColors,
     custom_tab_color_palette: CustomTabColorPalette,
+    claude_auto_color_rules: ClaudeAutoColorRules,
+    claude_auto_tab_colors: ClaudeAutoTabColors {
+        type: bool,
+        default: true,
+        supported_platforms: SupportedPlatforms::ALL,
+        sync_to_cloud: SyncToCloud::Never,
+        surface: settings::SettingSurfaces::GUI,
+        private: false,
+        toml_path: "appearance.tabs.claude_auto_tab_colors",
+        description: "Automatically color tabs from the Claude conversation running in them, based on keyword rules. While enabled, directory-based tab colors are inactive.",
+        feature_flag: warp_core::features::FeatureFlag::ClaudeAutoTabColors,
+    },
 ]);
 
 #[cfg(test)]

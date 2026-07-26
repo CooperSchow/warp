@@ -755,6 +755,11 @@ pub enum FeatureFlag {
     /// alongside the built-in ANSI colors.
     CustomTabColors,
 
+    /// Enables automatically coloring tabs from the Claude Code conversation
+    /// running in them, using user-defined keyword rules (Settings ▸ Appearance
+    /// ▸ Tabs). Mutually exclusive with directory-based tab colors at runtime.
+    ClaudeAutoTabColors,
+
     /// Enables the new settings to control visibility of Warp Drive, Code Review Panel,
     /// and Project Explorer & Global Search features.
     OpenWarpNewSettingsModes,
@@ -997,6 +1002,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::McpJsonTreeView,
     FeatureFlag::ClaudeConversations,
     FeatureFlag::ClaudeUsage,
+    FeatureFlag::ClaudeAutoTabColors,
 ];
 
 /// Features enabled for feature preview build users (e.g.: Friends of Warp).

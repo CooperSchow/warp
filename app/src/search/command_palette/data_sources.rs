@@ -155,7 +155,11 @@ impl DataSourceStore {
             }
 
             // Reopen past Claude Code sessions (`claude --resume <id>`).
-            if crate::settings::ClaudeSettings::as_ref(ctx).is_claude_conversations_enabled() {
+            // The singleton check keeps harnesses that skip full settings
+            // registration (unit tests) from panicking on this gate.
+            if ctx.has_singleton_model::<crate::settings::ClaudeSettings>()
+                && crate::settings::ClaudeSettings::as_ref(ctx).is_claude_conversations_enabled()
+            {
                 mixer.add_sync_source(
                     self.claude_conversations_data_source.clone(),
                     HashSet::from([QueryFilter::ClaudeConversations]),

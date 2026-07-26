@@ -4413,3 +4413,318 @@ fn test_tools_panel_warp_drive_toggle_updates_available_views() {
         });
     });
 }
+
+// ---------------------------------------------------------------------------
+// Claude-conversation auto tab coloring
+// ---------------------------------------------------------------------------
+
+/// Builds a workspace whose active tab has a Claude CLI agent session attached,
+/// pointed at `transcript_path`, and configures `rules` with auto-coloring on.
+///
+/// Returns the workspace and the terminal view id the session is keyed by.
+fn claude_auto_color_fixture(
+    app: &mut App,
+    rules: Vec<crate::workspace::tab_settings::ClaudeAutoColorRule>,
+    transcript_path: Option<String>,
+) -> (ViewHandle<Workspace>, EntityId) {
+    use crate::terminal::cli_agent::CLIAgent;
+    use crate::terminal::cli_agent_sessions::{
+        CLIAgentInputState, CLIAgentSession, CLIAgentSessionContext, CLIAgentSessionStatus,
+    };
+    use crate::workspace::tab_settings::ClaudeAutoColorRules;
+
+    app.update(|ctx| {
+        TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+            report_if_error!(settings.claude_auto_tab_colors.set_value(true, ctx));
+            report_if_error!(settings
+                .claude_auto_color_rules
+                .set_value(ClaudeAutoColorRules(rules), ctx));
+        });
+    });
+
+    let workspace = mock_workspace(app);
+    let terminal_view_id = workspace.update(app, |workspace, ctx| {
+        workspace
+            .active_tab_pane_group()
+            .as_ref(ctx)
+            .active_session_view(ctx)
+            .expect("mock workspace has a terminal view")
+            .id()
+    });
+
+    app.update(|ctx| {
+        CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+            sessions.set_session(
+                terminal_view_id,
+                CLIAgentSession {
+                    agent: CLIAgent::Claude,
+                    status: CLIAgentSessionStatus::InProgress,
+                    session_context: CLIAgentSessionContext {
+                        transcript_path,
+                        ..Default::default()
+                    },
+                    input_state: CLIAgentInputState::Closed,
+                    should_auto_toggle_input: false,
+                    listener: None,
+                    remote_host: None,
+                    plugin_version: None,
+                    draft_text: None,
+                    custom_command_prefix: None,
+                    received_rich_notification: false,
+                },
+                ctx,
+            );
+        });
+    });
+
+    (workspace, terminal_view_id)
+}
+
+/// Writes a transcript whose first real user prompt is `prompt`.
+fn write_transcript(dir: &tempfile::TempDir, prompt: &str) -> String {
+    let path = dir.path().join("session.jsonl");
+    let line = serde_json::json!({
+        "type": "user",
+        "message": { "role": "user", "content": prompt },
+    });
+    std::fs::write(&path, format!("{line}\n")).expect("write transcript");
+    path.to_string_lossy().into_owned()
+}
+
+fn rule(
+    name: &str,
+    keywords: &str,
+    color: &str,
+) -> crate::workspace::tab_settings::ClaudeAutoColorRule {
+    crate::workspace::tab_settings::ClaudeAutoColorRule {
+        name: name.to_string(),
+        keywords: keywords.to_string(),
+        color: color.to_string(),
+    }
+}
+
+/// Waits for the spawned transcript read + color application to settle.
+async fn settle() {
+    warpui::r#async::Timer::after(std::time::Duration::from_millis(300)).await;
+}
+
+#[test]
+fn claude_auto_color_applies_matching_rule_to_the_tab() {
+    let _flag = FeatureFlag::ClaudeAutoTabColors.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let transcript = write_transcript(&dir, "Weekly KPI report for IRE expired leads");
+        let (workspace, terminal_view_id) = claude_auto_color_fixture(
+            &mut app,
+            vec![
+                rule("SIA", "sia, pd portal", "#22aa55"),
+                rule("IRE", "ire, expired leads", "#ff8800"),
+            ],
+            Some(transcript),
+        );
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.try_claude_auto_color(terminal_view_id, ctx);
+        });
+        settle().await;
+
+        workspace.read(&app, |workspace, _| {
+            assert_eq!(
+                workspace.tabs[0].selected_color,
+                SelectedTabColor::Custom("#ff8800".to_string()),
+                "the rule with the most keyword hits should be applied"
+            );
+        });
+    });
+}
+
+#[test]
+fn claude_auto_color_leaves_the_tab_alone_when_no_rule_matches() {
+    let _flag = FeatureFlag::ClaudeAutoTabColors.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let transcript = write_transcript(&dir, "just poking around in some unrelated repo");
+        let (workspace, terminal_view_id) = claude_auto_color_fixture(
+            &mut app,
+            vec![rule("IRE", "ire, expired leads", "#ff8800")],
+            Some(transcript),
+        );
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.try_claude_auto_color(terminal_view_id, ctx);
+        });
+        settle().await;
+
+        workspace.read(&app, |workspace, _| {
+            assert_eq!(workspace.tabs[0].selected_color, SelectedTabColor::Unset);
+        });
+    });
+}
+
+#[test]
+fn claude_auto_color_never_overrides_a_manual_color() {
+    let _flag = FeatureFlag::ClaudeAutoTabColors.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let transcript = write_transcript(&dir, "IRE expired leads work");
+        let (workspace, terminal_view_id) = claude_auto_color_fixture(
+            &mut app,
+            vec![rule("IRE", "ire, expired leads", "#ff8800")],
+            Some(transcript),
+        );
+
+        // The user picked a color before the conversation was evaluated.
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.set_tab_color(
+                0,
+                SelectedTabColor::Color(warp_core::ui::theme::AnsiColorIdentifier::Blue),
+                ctx,
+            );
+            workspace.try_claude_auto_color(terminal_view_id, ctx);
+        });
+        settle().await;
+
+        workspace.read(&app, |workspace, _| {
+            assert_eq!(
+                workspace.tabs[0].selected_color,
+                SelectedTabColor::Color(warp_core::ui::theme::AnsiColorIdentifier::Blue),
+                "a manual color must survive auto-coloring"
+            );
+        });
+    });
+}
+
+#[test]
+fn claude_auto_color_respects_a_user_cleared_tab() {
+    let _flag = FeatureFlag::ClaudeAutoTabColors.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let transcript = write_transcript(&dir, "IRE expired leads work");
+        let (workspace, terminal_view_id) = claude_auto_color_fixture(
+            &mut app,
+            vec![rule("IRE", "ire, expired leads", "#ff8800")],
+            Some(transcript),
+        );
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.set_tab_color(0, SelectedTabColor::Cleared, ctx);
+            workspace.try_claude_auto_color(terminal_view_id, ctx);
+        });
+        settle().await;
+
+        workspace.read(&app, |workspace, _| {
+            assert_eq!(workspace.tabs[0].selected_color, SelectedTabColor::Cleared);
+        });
+    });
+}
+
+#[test]
+fn claude_auto_color_does_not_re_run_after_the_user_clears_it() {
+    let _flag = FeatureFlag::ClaudeAutoTabColors.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let transcript = write_transcript(&dir, "IRE expired leads work");
+        let (workspace, terminal_view_id) = claude_auto_color_fixture(
+            &mut app,
+            vec![rule("IRE", "ire, expired leads", "#ff8800")],
+            Some(transcript),
+        );
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.try_claude_auto_color(terminal_view_id, ctx);
+        });
+        settle().await;
+        workspace.read(&app, |workspace, _| {
+            assert_eq!(
+                workspace.tabs[0].selected_color,
+                SelectedTabColor::Custom("#ff8800".to_string())
+            );
+        });
+
+        // The user clears the automatically applied color; later session
+        // events must not bring it back.
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.set_tab_color(0, SelectedTabColor::Unset, ctx);
+            workspace.try_claude_auto_color(terminal_view_id, ctx);
+        });
+        settle().await;
+
+        workspace.read(&app, |workspace, _| {
+            assert_eq!(
+                workspace.tabs[0].selected_color,
+                SelectedTabColor::Unset,
+                "a conversation is evaluated at most once"
+            );
+        });
+    });
+}
+
+#[test]
+fn claude_auto_color_is_inert_when_the_setting_is_off() {
+    let _flag = FeatureFlag::ClaudeAutoTabColors.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let transcript = write_transcript(&dir, "IRE expired leads work");
+        let (workspace, terminal_view_id) = claude_auto_color_fixture(
+            &mut app,
+            vec![rule("IRE", "ire, expired leads", "#ff8800")],
+            Some(transcript),
+        );
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.claude_auto_tab_colors.set_value(false, ctx));
+            });
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.try_claude_auto_color(terminal_view_id, ctx);
+        });
+        settle().await;
+
+        workspace.read(&app, |workspace, _| {
+            assert_eq!(workspace.tabs[0].selected_color, SelectedTabColor::Unset);
+        });
+    });
+}
+
+#[test]
+fn claude_auto_color_suppresses_directory_tab_colors_while_enabled() {
+    let _flag = FeatureFlag::ClaudeAutoTabColors.override_enabled(true);
+    let _dir_flag = FeatureFlag::DirectoryTabColors.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let (workspace, _) = claude_auto_color_fixture(&mut app, vec![], None);
+
+        // A directory color that would otherwise be applied automatically.
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.tabs[0].default_directory_color =
+                Some(warp_core::ui::theme::AnsiColorIdentifier::Green);
+            let tab = &mut workspace.tabs[0];
+            Workspace::sync_codebase_tab_color(tab, ctx);
+            assert_eq!(
+                workspace.tabs[0].default_directory_color, None,
+                "directory colors are inactive while Claude auto-coloring is on"
+            );
+        });
+
+        // With the setting off the suppression stops: the tab's directory
+        // color slot is left for the directory logic to manage again.
+        app.update(|ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.claude_auto_tab_colors.set_value(false, ctx));
+            });
+        });
+        workspace.read(&app, |_, ctx| {
+            assert!(
+                !Workspace::claude_auto_tab_colors_enabled(ctx),
+                "the mutual-exclusion gate follows the setting"
+            );
+        });
+    });
+}

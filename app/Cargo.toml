@@ -681,6 +681,7 @@ default = [
     "settings_file",
     "directory_tab_colors",
     "custom_tab_colors",
+    "claude_auto_tab_colors",
     # Eqho fork: our Claude Code integrations, on by default so any build of this
     # version includes them (session browser + usage pill), not just builds that
     # remember to pass the feature flags.
@@ -1000,6 +1001,7 @@ queued_prompts_v2 = ["queue_slash_command"]
 inline_menu_headers = []
 directory_tab_colors = []
 custom_tab_colors = []
+claude_auto_tab_colors = []
 open_warp_new_settings_modes = []
 hoa_code_review = []
 vertical_tabs = []

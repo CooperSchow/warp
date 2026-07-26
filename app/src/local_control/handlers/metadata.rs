@@ -437,12 +437,27 @@ pub(crate) fn tab_list(
     let tabs = entries
         .into_iter()
         .map(|entry| {
+            // Effective tab color (manual or automatic), as the ANSI color
+            // name or `#rrggbb` hex; `null` when uncolored.
+            let color = workspace_for_window(entry.window_id, ActionKind::TabList, ctx)
+                .ok()
+                .flatten()
+                .and_then(|workspace| {
+                    workspace.read(ctx, |workspace, _| {
+                        workspace
+                            .tabs
+                            .get(entry.index)
+                            .and_then(|tab| tab.color())
+                            .map(|color| color.label().to_lowercase())
+                    })
+                });
             json!({
                 "tab_id": entry.pane_group.id().to_string(),
                 "window_id": entry.window_id.to_string(),
                 "window_index": entry.window_index as u32,
                 "index": entry.index as u32,
                 "is_active": entry.index == entry.workspace_active_tab_index,
+                "color": color,
             })
         })
         .collect::<Vec<_>>();

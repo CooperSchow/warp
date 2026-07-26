@@ -83,3 +83,66 @@ fn unparseable_lines_are_skipped() {
     assert_eq!(session.message_count, 2);
     assert_eq!(session.first_prompt.as_deref(), Some("kept"));
 }
+
+mod first_user_prompt_in_file {
+    use std::io::Write as _;
+
+    use super::super::first_user_prompt_in_file;
+
+    fn write_transcript(lines: &[&str]) -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        for line in lines {
+            writeln!(file, "{line}").expect("write line");
+        }
+        file
+    }
+
+    #[test]
+    fn returns_full_untruncated_prompt() {
+        let long_tail = "keyword-at-the-very-end".to_string();
+        let prompt = format!("{} {}", "x".repeat(500), long_tail);
+        let file = write_transcript(&[
+            r#"{"type":"last-prompt","sessionId":"s"}"#,
+            &format!(
+                r#"{{"type":"user","message":{{"role":"user","content":"{prompt}"}}}}"#
+            ),
+        ]);
+
+        let read = first_user_prompt_in_file(file.path()).expect("prompt");
+        assert!(read.len() > 200, "must not be truncated to the 200-char snippet");
+        assert!(read.ends_with(&long_tail));
+    }
+
+    #[test]
+    fn skips_meta_sidechain_and_system_injected_turns() {
+        let file = write_transcript(&[
+            r#"{"type":"user","isMeta":true,"message":{"content":"<local-command-caveat>Caveat</local-command-caveat>"}}"#,
+            r#"{"type":"user","isSidechain":true,"message":{"content":"subagent prompt"}}"#,
+            r#"{"type":"user","message":{"content":"<command-name>/model</command-name>"}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"text","text":"the real prompt"}]}}"#,
+        ]);
+
+        assert_eq!(
+            first_user_prompt_in_file(file.path()).as_deref(),
+            Some("the real prompt")
+        );
+    }
+
+    #[test]
+    fn returns_none_when_no_real_prompt_yet() {
+        let file = write_transcript(&[
+            r#"{"type":"mode","mode":"normal"}"#,
+            r#"{"type":"user","isMeta":true,"message":{"content":"<caveat>x</caveat>"}}"#,
+        ]);
+
+        assert_eq!(first_user_prompt_in_file(file.path()), None);
+    }
+
+    #[test]
+    fn returns_none_for_missing_file() {
+        assert_eq!(
+            first_user_prompt_in_file(std::path::Path::new("/nonexistent/x.jsonl")),
+            None
+        );
+    }
+}

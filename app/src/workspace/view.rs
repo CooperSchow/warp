@@ -88,6 +88,7 @@ use warpui::accessibility::{
     AccessibilityContent, AccessibilityVerbosity, ActionAccessibilityContent, WarpA11yRole,
 };
 use warpui::clipboard::ClipboardContent;
+use warpui::r#async::Timer;
 #[cfg(target_family = "wasm")]
 use warpui::elements::Percentage;
 use warpui::elements::{
@@ -131,6 +132,7 @@ use super::action::{
 };
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 use super::auto_handoff::AutoCloudHandoffController;
+use super::claude_auto_color::{self, ClaudeAutoColorPending};
 pub(crate) use super::close_session_confirmation_dialog::OpenDialogSource;
 use super::close_session_confirmation_dialog::{
     CloseSessionConfirmationDialog, CloseSessionConfirmationEvent,
@@ -381,6 +383,7 @@ use crate::terminal::available_shells::AvailableShells;
 use crate::terminal::block_list_viewport::InputMode;
 #[cfg(not(target_family = "wasm"))]
 use crate::terminal::cli_agent_sessions::plugin_manager::{plugin_manager_for, PluginModalKind};
+use crate::terminal::cli_agent::CLIAgent;
 use crate::terminal::cli_agent_sessions::{CLIAgentSessionsModel, CLIAgentSessionsModelEvent};
 use crate::terminal::enable_auto_reload_modal::{
     EnableAutoReloadModal, EnableAutoReloadModalEvent,
@@ -1012,6 +1015,12 @@ pub struct Workspace {
     pub(crate) tab_groups: HashMap<TabGroupId, TabGroup>,
     /// Per-group hover state for the horizontal tab bar.
     horizontal_tab_group_mouse_states: RefCell<HashMap<TabGroupId, HorizontalTabGroupMouseStates>>,
+    /// Claude auto tab coloring: per-terminal-view retry state for Claude
+    /// sessions whose first prompt hasn't been located on disk yet.
+    claude_auto_color_pending: HashMap<EntityId, ClaudeAutoColorPending>,
+    /// Terminal views whose Claude conversation has already been evaluated for
+    /// auto-coloring (matched or not) — never re-evaluated this run.
+    claude_auto_color_done: HashSet<EntityId>,
     tab_rename_editor: ViewHandle<EditorView>,
     pane_rename_editor: ViewHandle<EditorView>,
     tab_group_rename_editor: ViewHandle<EditorView>,
@@ -3364,6 +3373,8 @@ impl Workspace {
             traffic_light_mouse_states: Default::default(),
             tab_groups: HashMap::new(),
             horizontal_tab_group_mouse_states: RefCell::default(),
+            claude_auto_color_pending: HashMap::new(),
+            claude_auto_color_done: HashSet::new(),
             tab_rename_editor: Self::tab_rename_editor(ctx),
             pane_rename_editor: Self::pane_rename_editor(ctx),
             tab_group_rename_editor: Self::tab_group_rename_editor(ctx),
@@ -3701,8 +3712,172 @@ impl Workspace {
                 | CLIAgentSessionsModelEvent::SessionUpdated { .. }
         ) && self.workspace_contains_terminal_view(event.terminal_view_id(), ctx)
         {
+            match event {
+                CLIAgentSessionsModelEvent::Ended { terminal_view_id, .. } => {
+                    // Stop waiting on a conversation that ended before we
+                    // could locate its first prompt.
+                    self.claude_auto_color_pending.remove(terminal_view_id);
+                }
+                CLIAgentSessionsModelEvent::Started { .. }
+                | CLIAgentSessionsModelEvent::StatusChanged { .. }
+                | CLIAgentSessionsModelEvent::SessionUpdated { .. } => {
+                    self.try_claude_auto_color(event.terminal_view_id(), ctx);
+                }
+                CLIAgentSessionsModelEvent::InputSessionChanged { .. } => {}
+            }
             ctx.notify();
         }
+    }
+
+    /// One evaluation step of Claude-conversation auto tab coloring for the
+    /// Claude session running in `terminal_view_id`.
+    ///
+    /// Applies a color at most once per conversation: it only ever fires while
+    /// the tab's `selected_color` is `Unset`, and writes the matched color
+    /// *into* `selected_color` — so a manual pick (or an earlier auto
+    /// assignment, which persists across restarts) permanently wins, and a
+    /// user-cleared tab (`Cleared`) is never re-colored.
+    fn try_claude_auto_color(&mut self, terminal_view_id: EntityId, ctx: &mut ViewContext<Self>) {
+        if self.claude_auto_color_done.contains(&terminal_view_id)
+            || !Self::claude_auto_tab_colors_enabled(ctx)
+            || TabSettings::as_ref(ctx)
+                .claude_auto_color_rules
+                .value()
+                .rules()
+                .is_empty()
+        {
+            return;
+        }
+
+        // The session must still be live and must be Claude.
+        let sessions_model = CLIAgentSessionsModel::as_ref(ctx);
+        let Some(session) = sessions_model
+            .session(terminal_view_id)
+            .filter(|session| matches!(session.agent, CLIAgent::Claude))
+        else {
+            self.claude_auto_color_pending.remove(&terminal_view_id);
+            return;
+        };
+        let transcript_path = session.session_context.transcript_path.clone();
+        let session_cwd = session.session_context.cwd.clone();
+        let resume_id = session.resume_id();
+
+        // The tab must still exist and must not have a color decision already.
+        let Some(tab_index) = self.tabs.iter().position(|tab| {
+            tab.pane_group
+                .as_ref(ctx)
+                .contains_terminal_view(terminal_view_id, ctx)
+        }) else {
+            self.claude_auto_color_pending.remove(&terminal_view_id);
+            return;
+        };
+        if self.tabs[tab_index].selected_color != SelectedTabColor::Unset {
+            self.claude_auto_color_pending.remove(&terminal_view_id);
+            self.claude_auto_color_done.insert(terminal_view_id);
+            return;
+        }
+
+        let pending = self
+            .claude_auto_color_pending
+            .entry(terminal_view_id)
+            .or_insert_with(|| ClaudeAutoColorPending::new(SystemTime::now()));
+        if pending.in_flight {
+            return;
+        }
+        pending.in_flight = true;
+        let started_at = pending.started_at;
+
+        // Fall back to the pane's own cwd when the plugin didn't report one.
+        let cwd = session_cwd.or_else(|| {
+            self.tabs[tab_index]
+                .pane_group
+                .as_ref(ctx)
+                .active_session_view(ctx)
+                .and_then(|tv| tv.as_ref(ctx).canonical_session_pwd_if_local(ctx))
+                .map(|path| path.as_path().to_string_lossy().into_owned())
+        });
+
+        ctx.spawn(
+            async move {
+                claude_auto_color::locate_first_prompt(
+                    transcript_path,
+                    resume_id,
+                    cwd,
+                    started_at,
+                )
+            },
+            move |me, first_prompt, ctx| {
+                me.finish_claude_auto_color_attempt(terminal_view_id, first_prompt, ctx);
+            },
+        );
+    }
+
+    /// Completes one auto-color evaluation attempt: applies the best rule
+    /// match when the first prompt was found, otherwise schedules a retry.
+    fn finish_claude_auto_color_attempt(
+        &mut self,
+        terminal_view_id: EntityId,
+        first_prompt: Option<String>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(pending) = self.claude_auto_color_pending.get_mut(&terminal_view_id) else {
+            return;
+        };
+        pending.in_flight = false;
+
+        let Some(first_prompt) = first_prompt else {
+            // No transcript / no real prompt yet — retry on a bounded schedule
+            // (session events also re-trigger evaluation immediately).
+            pending.attempts += 1;
+            match claude_auto_color::next_retry_delay(pending.attempts) {
+                Some(delay) => {
+                    ctx.spawn(
+                        async move {
+                            Timer::after(delay).await;
+                        },
+                        move |me, _, ctx| {
+                            me.try_claude_auto_color(terminal_view_id, ctx);
+                        },
+                    );
+                }
+                None => {
+                    self.claude_auto_color_pending.remove(&terminal_view_id);
+                    self.claude_auto_color_done.insert(terminal_view_id);
+                }
+            }
+            return;
+        };
+
+        // Evaluated: whatever the outcome, never run again for this conversation.
+        self.claude_auto_color_pending.remove(&terminal_view_id);
+        self.claude_auto_color_done.insert(terminal_view_id);
+
+        // The feature can be turned off while the transcript read is in
+        // flight; a disabled feature must never write a color.
+        if !Self::claude_auto_tab_colors_enabled(ctx) {
+            return;
+        }
+
+        let rules = TabSettings::as_ref(ctx).claude_auto_color_rules.value();
+        let Some(color) = claude_auto_color::best_rule_match(rules.rules(), &first_prompt)
+            .map(|rule| rule.color.clone())
+        else {
+            return;
+        };
+
+        // Re-locate the tab and re-check eligibility — it may have moved,
+        // closed, or been manually colored while the transcript was read.
+        let Some(tab_index) = self.tabs.iter().position(|tab| {
+            tab.pane_group
+                .as_ref(ctx)
+                .contains_terminal_view(terminal_view_id, ctx)
+        }) else {
+            return;
+        };
+        if self.tabs[tab_index].selected_color != SelectedTabColor::Unset {
+            return;
+        }
+        self.set_tab_color(tab_index, SelectedTabColor::Custom(color), ctx);
     }
 
     /// Handle session settings changes.
@@ -3812,7 +3987,19 @@ impl Workspace {
             | TabSettingsChangedEvent::VerticalTabsShowPrLink { .. }
             | TabSettingsChangedEvent::VerticalTabsShowDiffStats { .. }
             | TabSettingsChangedEvent::HideTitleBarSearchBarInVerticalTabs { .. }
-            | TabSettingsChangedEvent::CustomTabColorPalette { .. } => {
+            | TabSettingsChangedEvent::CustomTabColorPalette { .. }
+            | TabSettingsChangedEvent::ClaudeAutoColorRules { .. } => {
+                ctx.notify();
+            }
+            TabSettingsChangedEvent::ClaudeAutoTabColors { .. } => {
+                // Claude auto-coloring and directory-based coloring are
+                // mutually exclusive; re-sync so directory colors clear when
+                // this turns on and come back when it turns off.
+                if FeatureFlag::DirectoryTabColors.is_enabled() {
+                    for tab in &mut self.tabs {
+                        Self::sync_codebase_tab_color(tab, ctx);
+                    }
+                }
                 ctx.notify();
             }
             TabSettingsChangedEvent::VerticalTabsShowDetailsOnHover { .. } => {
@@ -5631,7 +5818,19 @@ impl Workspace {
     /// Syncs the tab color for the given tab based on the active terminal's CWD.
     /// If the CWD is within a directory that has a configured color, applies it.
     /// If the CWD moves outside all configured directories, the directory color is cleared.
+    ///
+    /// Inactive while Claude auto tab coloring is enabled — the two automatic
+    /// coloring systems are mutually exclusive, so directory colors are cleared
+    /// rather than applied for as long as that setting is on.
     fn sync_codebase_tab_color(tab: &mut TabData, ctx: &mut ViewContext<Self>) {
+        if Self::claude_auto_tab_colors_enabled(ctx) {
+            if tab.default_directory_color.is_some() {
+                tab.default_directory_color = None;
+                ctx.notify();
+            }
+            return;
+        }
+
         let Some(cwd) = tab
             .pane_group
             .as_ref(ctx)
@@ -5649,6 +5848,13 @@ impl Workspace {
 
         tab.default_directory_color = color;
         ctx.notify();
+    }
+
+    /// True when the Claude-conversation auto tab coloring feature is enabled
+    /// (feature flag + user setting).
+    pub(crate) fn claude_auto_tab_colors_enabled(app: &AppContext) -> bool {
+        FeatureFlag::ClaudeAutoTabColors.is_enabled()
+            && *TabSettings::as_ref(app).claude_auto_tab_colors.value()
     }
 
     fn clear_tab_name_editor(&mut self, ctx: &mut ViewContext<Self>) {
@@ -21916,7 +22122,12 @@ impl Workspace {
         appearance: &Appearance,
         ctx: &AppContext,
     ) -> Option<Box<dyn Element>> {
-        if !crate::settings::ClaudeSettings::as_ref(ctx).is_claude_usage_pill_enabled() {
+        // Singleton checks keep harnesses that skip full app initialization
+        // (unit tests) from panicking here during render.
+        if !ctx.has_singleton_model::<crate::settings::ClaudeSettings>()
+            || !ctx.has_singleton_model::<crate::claude_usage::ClaudeUsageModel>()
+            || !crate::settings::ClaudeSettings::as_ref(ctx).is_claude_usage_pill_enabled()
+        {
             return None;
         }
 

@@ -190,20 +190,27 @@ pub fn claude_projects_dir() -> Option<PathBuf> {
 /// It is deliberately not a valid session-id/UUID so it can never collide with one.
 pub const CLAUDE_CONTINUE_SENTINEL: &str = "__warp_claude_continue__";
 
-/// Resumable Claude conversation ids for `cwd`, newest-modified first. Used to
-/// assign a restored tab a concrete, distinct conversation when its exact id was
-/// lost (so multiple tabs don't all collapse onto the same `--continue`
-/// conversation). Claude stores each project's transcripts in a directory whose
-/// name is the cwd with every non-alphanumeric character replaced by `-`.
-pub fn session_ids_for_cwd(cwd: &str) -> Vec<String> {
-    let Some(root) = claude_projects_dir() else {
-        return Vec::new();
-    };
+/// The on-disk project directory holding transcripts for `cwd`. Claude stores
+/// each project's transcripts in a directory whose name is the cwd with every
+/// non-alphanumeric character replaced by `-`.
+pub fn project_dir_for_cwd(cwd: &str) -> Option<PathBuf> {
+    let root = claude_projects_dir()?;
     let encoded: String = cwd
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    let Ok(entries) = std::fs::read_dir(root.join(encoded)) else {
+    Some(root.join(encoded))
+}
+
+/// Resumable Claude conversation ids for `cwd`, newest-modified first. Used to
+/// assign a restored tab a concrete, distinct conversation when its exact id was
+/// lost (so multiple tabs don't all collapse onto the same `--continue`
+/// conversation).
+pub fn session_ids_for_cwd(cwd: &str) -> Vec<String> {
+    let Some(project_dir) = project_dir_for_cwd(cwd) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(project_dir) else {
         return Vec::new();
     };
     let mut sessions: Vec<(std::time::SystemTime, String)> = entries
@@ -246,6 +253,91 @@ pub fn session_file_exists(id: &str) -> bool {
     entries
         .flatten()
         .any(|entry| entry.path().join(&file_name).is_file())
+}
+
+/// Absolute path of the transcript named `<id>.jsonl` under any project
+/// directory in the Claude store, if it exists. Same traversal-guarded lookup
+/// as [`session_file_exists`], but returns the path for reading.
+pub fn session_file_path(id: &str) -> Option<PathBuf> {
+    if id.is_empty() || id.contains('/') || id.contains(std::path::MAIN_SEPARATOR) {
+        return None;
+    }
+    let root = claude_projects_dir()?;
+    let entries = std::fs::read_dir(&root).ok()?;
+    let file_name = format!("{id}.jsonl");
+    entries.flatten().find_map(|entry| {
+        let candidate = entry.path().join(&file_name);
+        candidate.is_file().then_some(candidate)
+    })
+}
+
+/// Transcript files for `cwd` modified at or after `since`, newest-modified
+/// first. Used to find the conversation that just started in a pane when the
+/// exact session id is unknown. Skips `agent-*` subagent transcripts.
+pub fn transcripts_for_cwd_modified_after(
+    cwd: &str,
+    since: std::time::SystemTime,
+) -> Vec<PathBuf> {
+    let Some(project_dir) = project_dir_for_cwd(cwd) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(project_dir) else {
+        return Vec::new();
+    };
+    let mut transcripts: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                return None;
+            }
+            let stem = path.file_stem()?.to_str()?;
+            if stem.starts_with("agent-") {
+                return None;
+            }
+            let mtime = entry.metadata().ok()?.modified().ok()?;
+            (mtime >= since).then_some((mtime, path))
+        })
+        .collect();
+    transcripts.sort_by(|a, b| b.0.cmp(&a.0));
+    transcripts.into_iter().map(|(_, path)| path).collect()
+}
+
+/// The full text of the first real user prompt in the transcript at `path`.
+///
+/// "Real" means: a non-sidechain, non-meta `user` turn whose text is non-empty
+/// and not a system-injected (`<...>`) opener — the same notion of "first
+/// prompt" as [`ClaudeSession::first_prompt`], but returning the untruncated
+/// text. Returns `None` when the file can't be read or no such turn exists yet
+/// (e.g. the conversation was just started and nothing has been submitted).
+pub fn first_user_prompt_in_file(path: &Path) -> Option<String> {
+    let file = File::open(path).ok()?;
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        let Ok(obj) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if obj.get("type").and_then(Value::as_str) != Some("user") {
+            continue;
+        }
+        let is_sidechain = obj
+            .get("isSidechain")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let is_meta = obj.get("isMeta").and_then(Value::as_bool).unwrap_or(false);
+        if is_sidechain || is_meta {
+            continue;
+        }
+        let Some(content) = obj.get("message").and_then(|m| m.get("content")) else {
+            continue;
+        };
+        let text = text_of(content);
+        let trimmed = text.trim();
+        if trimmed.is_empty() || trimmed.starts_with('<') {
+            continue;
+        }
+        return Some(trimmed.to_string());
+    }
+    None
 }
 
 /// Read every resume-able Claude Code session under `projects_root`, newest first.
