@@ -272,20 +272,34 @@ pub fn session_file_path(id: &str) -> Option<PathBuf> {
     })
 }
 
-/// Transcript files for `cwd` modified at or after `since`, newest-modified
+/// Transcript files for `cwd` **created** at or after `since`, earliest-created
 /// first. Used to find the conversation that just started in a pane when the
 /// exact session id is unknown. Skips `agent-*` subagent transcripts.
-pub fn transcripts_for_cwd_modified_after(
-    cwd: &str,
-    since: std::time::SystemTime,
-) -> Vec<PathBuf> {
+///
+/// Creation time, not modification time, is what identifies a pane's own
+/// transcript. Every session in a directory keeps appending to its file, so the
+/// most-recently-*modified* transcript is simply the busiest conversation —
+/// usually a long-running one that started days ago, not the one that just
+/// began. Filtering on creation time excludes those outright.
+///
+/// Earliest-first ordering keeps two sessions started back-to-back in the same
+/// directory apart: each pane's own transcript is the *first* one created after
+/// that pane's session began, so an older pane still waiting for its first
+/// prompt won't adopt a newer pane's conversation.
+pub fn transcripts_for_cwd_created_after(cwd: &str, since: SystemTime) -> Vec<PathBuf> {
     let Some(project_dir) = project_dir_for_cwd(cwd) else {
         return Vec::new();
     };
+    transcripts_in_dir_created_after(&project_dir, since)
+}
+
+/// [`transcripts_for_cwd_created_after`], against an already-resolved project
+/// directory.
+fn transcripts_in_dir_created_after(project_dir: &Path, since: SystemTime) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(project_dir) else {
         return Vec::new();
     };
-    let mut transcripts: Vec<(std::time::SystemTime, PathBuf)> = entries
+    let mut transcripts: Vec<(SystemTime, PathBuf)> = entries
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
@@ -296,13 +310,22 @@ pub fn transcripts_for_cwd_modified_after(
             if stem.starts_with("agent-") {
                 return None;
             }
-            let mtime = entry.metadata().ok()?.modified().ok()?;
-            (mtime >= since).then_some((mtime, path))
+            let metadata = entry.metadata().ok()?;
+            // `created` is not recorded by every filesystem; where it is
+            // missing, modification time is the only thing left to go on.
+            let created = metadata.created().or_else(|_| metadata.modified()).ok()?;
+            (created >= since).then_some((created, path))
         })
         .collect();
-    transcripts.sort_by(|a, b| b.0.cmp(&a.0));
+    transcripts.sort_by(|a, b| a.0.cmp(&b.0));
     transcripts.into_iter().map(|(_, path)| path).collect()
 }
+
+/// How far into a transcript we look for its first real user prompt. The
+/// opening turns are a handful of lines; this only bounds the pathological case
+/// of a transcript that contains nothing but system-injected records, so a
+/// retry loop can't be made to re-read a multi-megabyte file each pass.
+const FIRST_PROMPT_SCAN_BYTES: u64 = 2 * 1024 * 1024;
 
 /// The full text of the first real user prompt in the transcript at `path`.
 ///
@@ -313,7 +336,10 @@ pub fn transcripts_for_cwd_modified_after(
 /// (e.g. the conversation was just started and nothing has been submitted).
 pub fn first_user_prompt_in_file(path: &Path) -> Option<String> {
     let file = File::open(path).ok()?;
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
+    for line in BufReader::new((&file).take(FIRST_PROMPT_SCAN_BYTES))
+        .lines()
+        .map_while(Result::ok)
+    {
         let Ok(obj) = serde_json::from_str::<Value>(&line) else {
             continue;
         };

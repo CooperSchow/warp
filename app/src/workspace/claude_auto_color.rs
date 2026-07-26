@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 
 use super::tab_settings::ClaudeAutoColorRule;
 use crate::terminal::cli_agent_sessions::history::{
-    first_user_prompt_in_file, session_file_path, transcripts_for_cwd_modified_after,
+    first_user_prompt_in_file, session_file_path, transcripts_for_cwd_created_after,
     CLAUDE_CONTINUE_SENTINEL,
 };
 
@@ -51,10 +51,23 @@ pub(crate) fn best_rule_match<'a>(
 fn rule_score(rule: &ClaudeAutoColorRule, haystack: &str) -> usize {
     rule.keywords
         .split(',')
-        .map(str::trim)
+        .map(normalized_keyword)
         .filter(|k| !k.is_empty())
-        .filter(|keyword| keyword_matches(&keyword.to_lowercase(), haystack))
+        .filter(|keyword| keyword_matches(keyword, haystack))
         .count()
+}
+
+/// Trims one comma-separated keyword down to what should actually be searched
+/// for: surrounding whitespace and quotes removed, lowercased.
+///
+/// Quoting is the natural way to write a multi-word keyword — `"Inside Real
+/// Estate", "IRE"` — so the quote characters must not end up as part of the
+/// needle. Without this, such a rule silently never matches anything.
+fn normalized_keyword(raw: &str) -> String {
+    raw.trim()
+        .trim_matches(|c| matches!(c, '"' | '\'' | '\u{201c}' | '\u{201d}' | '\u{2018}' | '\u{2019}'))
+        .trim()
+        .to_lowercase()
 }
 
 /// True if `needle` (lowercase) occurs in `haystack` (lowercase), respecting
@@ -138,9 +151,14 @@ pub(crate) fn next_retry_delay(attempts: u32) -> Option<Duration> {
 }
 
 /// Grace subtracted from the session start when scoping the cwd transcript
-/// search, to absorb clock/mtime granularity and the transcript being created
-/// moments before we noticed the session.
-const SESSION_START_MTIME_GRACE: Duration = Duration::from_secs(10);
+/// search, to absorb clock/timestamp granularity and the transcript being
+/// created moments before we noticed the session.
+///
+/// Deliberately small: it is what keeps two Claude sessions started
+/// back-to-back in the same directory from being confused for one another. A
+/// wide grace would pull the older pane's transcript into the newer pane's
+/// candidate set.
+const SESSION_START_GRACE: Duration = Duration::from_secs(10);
 
 /// Locates the transcript for a just-started Claude conversation and returns
 /// the full text of its first real user prompt, if it exists yet.
@@ -148,7 +166,7 @@ const SESSION_START_MTIME_GRACE: Duration = Duration::from_secs(10);
 /// Resolution order mirrors how confident we are in each signal:
 /// 1. `transcript_path` reported by the Warp Claude plugin (exact),
 /// 2. `resume_id` (transcript stem / plugin session id, exact when present),
-/// 3. newest transcript in the pane's cwd project dir modified since the
+/// 3. the first transcript created in the pane's cwd project dir since the
 ///    session started (fallback for the common plugin-absent case).
 ///
 /// Runs blocking file IO — call from a background task, not the main thread.
@@ -174,9 +192,9 @@ pub(crate) fn locate_first_prompt(
 
     if let Some(cwd) = cwd {
         let since = session_started_at
-            .checked_sub(SESSION_START_MTIME_GRACE)
+            .checked_sub(SESSION_START_GRACE)
             .unwrap_or(session_started_at);
-        for path in transcripts_for_cwd_modified_after(&cwd, since) {
+        for path in transcripts_for_cwd_created_after(&cwd, since) {
             if let Some(prompt) = first_user_prompt_in_file(&path) {
                 return Some(prompt);
             }
@@ -286,6 +304,97 @@ mod tests {
         // bounded so idle prompts aren't polled forever.
         assert!(total >= Duration::from_secs(10 * 60));
         assert!(total <= Duration::from_secs(45 * 60));
+    }
+
+    #[test]
+    fn quoted_keywords_match_without_their_quotes() {
+        // Quoting is a natural way to write a keyword list, especially one with
+        // multi-word entries. Regression: the quotes used to be searched for
+        // literally, so a rule written this way never matched anything.
+        let rules = [rule("NWC", r#""Nutrition Wellness Center", "NWC""#)];
+        assert!(best_rule_match(&rules, "NWC").is_some());
+        assert!(best_rule_match(&rules, "checking the Nutrition Wellness Center flow").is_some());
+        assert!(best_rule_match(&rules, "nothing relevant here").is_none());
+    }
+
+    #[test]
+    fn quote_stripping_keeps_word_boundary_matching() {
+        // Stripping quotes must leave a bare word bare, so it still matches on
+        // word boundaries rather than degrading into a substring match.
+        let rules = [rule("IRE", r#""IRE""#)];
+        assert!(best_rule_match(&rules, "we hired a contractor").is_none());
+        assert!(best_rule_match(&rules, "the IRE campaign").is_some());
+    }
+
+    #[test]
+    fn stray_and_smart_quotes_are_tolerated() {
+        let rules = [rule("Odd", "\u{201c}nwc\u{201d}, \"ire")];
+        assert!(best_rule_match(&rules, "an NWC question").is_some());
+        assert!(best_rule_match(&rules, "an IRE question").is_some());
+    }
+
+    /// Runs the real resolution path against the local `~/.claude` store: takes
+    /// the most recently created transcript, pretends a pane's Claude session
+    /// started a moment before it, and checks that we come back with *that*
+    /// conversation's first prompt rather than whichever file in the directory
+    /// happens to have been written to most recently.
+    ///
+    /// Ignored by default (it depends on the machine's own Claude history); run
+    /// with `cargo test -p warp --lib --features gui -- --ignored
+    /// resolves_the_pane_own_conversation_in_the_real_store --nocapture`.
+    #[test]
+    #[ignore = "reads the local ~/.claude store"]
+    fn resolves_the_pane_own_conversation_in_the_real_store() {
+        use crate::terminal::cli_agent_sessions::history::{
+            claude_projects_dir, first_user_prompt_in_file,
+        };
+
+        let Some(root) = claude_projects_dir().filter(|r| r.is_dir()) else {
+            println!("no ~/.claude/projects; skipping");
+            return;
+        };
+
+        // Newest-created transcript anywhere in the store, and the cwd it ran in.
+        let newest = std::fs::read_dir(&root)
+            .expect("read projects root")
+            .flatten()
+            .flat_map(|project| std::fs::read_dir(project.path()).into_iter().flatten())
+            .flatten()
+            .filter(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("jsonl"))
+            .filter_map(|entry| {
+                let created = entry.metadata().ok()?.created().ok()?;
+                Some((created, entry.path()))
+            })
+            .max_by_key(|(created, _)| *created);
+        let Some((created, path)) = newest else {
+            println!("store is empty; skipping");
+            return;
+        };
+
+        let expected = first_user_prompt_in_file(&path);
+        let cwd = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|body| {
+                body.lines().find_map(|line| {
+                    serde_json::from_str::<serde_json::Value>(line)
+                        .ok()?
+                        .get("cwd")?
+                        .as_str()
+                        .map(str::to_string)
+                })
+            })
+            .expect("newest transcript records a cwd");
+
+        let started_at = created - Duration::from_secs(1);
+        let found = locate_first_prompt(None, None, Some(cwd.clone()), started_at);
+
+        println!("cwd:      {cwd}");
+        println!("expected: {:?}", expected.as_deref().map(|p| &p[..p.len().min(60)]));
+        println!("found:    {:?}", found.as_deref().map(|p| &p[..p.len().min(60)]));
+        assert_eq!(
+            found, expected,
+            "must resolve the pane's own conversation, not the busiest one in the directory"
+        );
     }
 
     #[test]

@@ -293,3 +293,110 @@ mod real_store_bench {
         );
     }
 }
+
+/// Picking the transcript that belongs to a pane whose Claude session just
+/// started, out of a directory that also holds older, still-active sessions.
+mod transcript_selection {
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, SystemTime};
+
+    use super::super::transcripts_in_dir_created_after;
+
+    fn write(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, body).expect("write transcript");
+        path
+    }
+
+    /// Files created in the same test tick can share a creation timestamp,
+    /// which makes ordering assertions meaningless. Space them out by more than
+    /// the coarsest filesystem timestamp granularity we care about.
+    fn tick() {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    #[test]
+    fn a_busy_old_session_never_shadows_the_new_one() {
+        // The regression this guards: every tab in a monorepo-style working
+        // directory shares one project dir, so a days-old conversation that is
+        // being actively written is *always* the most recently modified file
+        // there. Selecting by mtime handed panes the wrong conversation.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let old = write(dir.path(), "old.jsonl", "{\"type\":\"user\"}\n");
+        tick();
+
+        let since = SystemTime::now();
+        tick();
+        let new = write(dir.path(), "new.jsonl", "{\"type\":\"user\"}\n");
+
+        // The old session keeps writing, so it is now the newest by mtime.
+        tick();
+        std::fs::write(&old, "{\"type\":\"user\"}\n{\"type\":\"user\"}\n").expect("append");
+
+        assert_eq!(
+            transcripts_in_dir_created_after(dir.path(), since),
+            vec![new],
+            "only the transcript created after the session started is a candidate"
+        );
+    }
+
+    #[test]
+    fn back_to_back_sessions_each_get_their_own_transcript() {
+        // Two Claude tabs opened moments apart in one directory. Each pane's
+        // own transcript is the first one created after that pane started, so
+        // earliest-first ordering must hold.
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let first_started = SystemTime::now();
+        tick();
+        let first = write(dir.path(), "first.jsonl", "{}\n");
+        tick();
+
+        let second_started = SystemTime::now();
+        tick();
+        let second = write(dir.path(), "second.jsonl", "{}\n");
+
+        assert_eq!(
+            transcripts_in_dir_created_after(dir.path(), first_started).first(),
+            Some(&first),
+            "the earlier pane must take the earlier transcript"
+        );
+        assert_eq!(
+            transcripts_in_dir_created_after(dir.path(), second_started),
+            vec![second],
+            "the later pane must not see the earlier pane's transcript at all"
+        );
+    }
+
+    #[test]
+    fn subagent_transcripts_and_non_transcripts_are_ignored() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let since = SystemTime::now();
+        tick();
+        write(dir.path(), "agent-helper.jsonl", "{}\n");
+        write(dir.path(), "notes.txt", "hello");
+        let real = write(dir.path(), "real.jsonl", "{}\n");
+
+        assert_eq!(transcripts_in_dir_created_after(dir.path(), since), vec![real]);
+    }
+
+    #[test]
+    fn nothing_is_returned_when_no_session_started_after_the_cutoff() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        write(dir.path(), "old.jsonl", "{}\n");
+        tick();
+        let since = SystemTime::now();
+
+        assert!(
+            transcripts_in_dir_created_after(dir.path(), since).is_empty(),
+            "no candidate is better than the wrong candidate: the caller retries"
+        );
+    }
+
+    #[test]
+    fn a_missing_directory_is_not_an_error() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("does-not-exist");
+        assert!(transcripts_in_dir_created_after(&missing, SystemTime::UNIX_EPOCH).is_empty());
+    }
+}
