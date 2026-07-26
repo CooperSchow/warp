@@ -1,10 +1,16 @@
-# Eqho fork — performance notes and pitfalls
+# Eqho fork — pitfalls, performance and otherwise
 
 Why this file exists: the fork's custom features made WarpOss noticeably slower
 than stock Warp — long startup, beachballs, an unusable Settings page — while
 stock Warp on the same machine was always smooth. Every cause was something
 *we* introduced, and each was avoidable. Read this before adding a feature that
 touches the filesystem, the keychain, or the settings UI.
+
+Pitfalls 1–4 are the performance ones. 5–7 came later, from features that were
+fast but behaved erratically — a pill that flickered on its own and a tab color
+that picked the wrong conversation. Same lesson in a different costume: state
+that changes behind the UI's back needs a deliberate answer for *when* it
+changes.
 
 ---
 
@@ -107,6 +113,60 @@ periodically; it costs one slower build and nothing else.
 - **Session restore is inherently heavy.** Restoring N Claude tabs launches N
   `claude --resume` processes at once. That's the feature working as designed,
   but it makes cold start expensive — don't add more startup work on top of it.
+
+---
+
+## Pitfall 5 — A polled model with no subscriber renders at random moments
+
+The Claude usage pill read `ClaudeUsageModel` during the tab bar's render, but
+nothing ever *observed* that model. `ctx.notify()` inside a singleton model only
+wakes views that subscribed to it, so a new reading didn't repaint anything: the
+pill appeared whenever some unrelated event happened to redraw the tab bar, and
+looked completely random to the user.
+
+**Rule:** if a view reads a model that changes on its own (a poll, a watcher, a
+background load), the view must `ctx.subscribe_to_model(...)` and `ctx.notify()`.
+Rendering the value is not the same as reacting to it. Guard the subscription
+with `ctx.has_singleton_model::<T>()` when the model isn't registered in test
+harnesses.
+
+---
+
+## Pitfall 6 — Don't let a transient failure erase user-visible state
+
+The same pill also cleared its reading whenever a poll failed
+(`set_usage(None)`), so it blinked out for a minute at a time. The usage
+endpoint answers **HTTP 429** when polled eagerly, and a 429 body parses to "no
+reading" — indistinguishable, to the old code, from "the user has no usage".
+
+**Rules for anything polled:**
+
+- A failed refresh should leave the last good value in place, with an explicit
+  staleness cutoff for when the value would start to mislead.
+- Back *off* after a failure, never retry faster. For a rate-limited endpoint,
+  an eager retry is what causes the next failure.
+- Keep the "never loaded" and "failed to reload" states distinct — they call
+  for different behavior and different logging.
+
+---
+
+## Pitfall 7 — Identify a pane's file by creation time, not modification time
+
+Claude auto-coloring located a pane's conversation by taking the
+most-recently-*modified* transcript in the project directory. In any directory
+where several sessions run (i.e. all of them — every tab in a monorepo shares
+one project dir), that reliably returns the **busiest** conversation, which is
+usually a long-running one from days ago, not the one that just started.
+
+`transcripts_for_cwd_created_after` filters on creation time and returns
+earliest-first, so a pane takes the first transcript created after its own
+session began. Ordering matters as much as filtering: it's what keeps two tabs
+opened moments apart from adopting each other's conversation. The grace window
+subtracted from the session start has to stay small for the same reason.
+
+**Rule:** "which file belongs to this thing" is a question about when the file
+came into existence. mtime answers "which file is busiest", which is a different
+question with a plausible-looking wrong answer.
 
 ---
 

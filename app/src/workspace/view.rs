@@ -3142,6 +3142,18 @@ impl Workspace {
             me.handle_cli_agent_sessions_event(event, ctx);
         });
 
+        // Repaint the tab bar when a usage reading lands. Without this the pill
+        // only appeared the next time something *else* redrew the tab bar, so
+        // it seemed to show up and disappear at random moments.
+        if ctx.has_singleton_model::<crate::claude_usage::ClaudeUsageModel>() {
+            ctx.subscribe_to_model(
+                &crate::claude_usage::ClaudeUsageModel::handle(ctx),
+                |_me, _handle, _event: &crate::claude_usage::ClaudeUsageEvent, ctx| {
+                    ctx.notify();
+                },
+            );
+        }
+
         ctx.subscribe_to_model(
             &AgentNotificationsModel::handle(ctx),
             Self::handle_agent_management_event,
