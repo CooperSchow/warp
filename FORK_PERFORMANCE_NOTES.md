@@ -132,21 +132,48 @@ harnesses.
 
 ---
 
-## Pitfall 6 — Don't let a transient failure erase user-visible state
+## Pitfall 6 — A UI element's *presence* must not depend on its data
 
-The same pill also cleared its reading whenever a poll failed
-(`set_usage(None)`), so it blinked out for a minute at a time. The usage
-endpoint answers **HTTP 429** when polled eagerly, and a 429 body parses to "no
-reading" — indistinguishable, to the old code, from "the user has no usage".
+The same pill was hidden whenever it had no reading, and it cleared its reading
+on any failed poll (`set_usage(None)`). The usage endpoint answers **HTTP 429**
+when polled eagerly — it is shared with Claude Code's own usage checks and
+rate-limits the account as a whole — and a 429 body parses to "no reading",
+indistinguishable to the old code from "this user has no usage". So the pill
+blinked out for a minute at a time, and on a launch where no poll ever
+succeeded it simply never appeared.
 
-**Rules for anything polled:**
+Making readings *sticky* was only half a fix: stickiness preserves the last
+value, and there is no last value on a cold start. The rest of the fix was to
+separate the two questions:
 
-- A failed refresh should leave the last good value in place, with an explicit
-  staleness cutoff for when the value would start to mislead.
-- Back *off* after a failure, never retry faster. For a rate-limited endpoint,
-  an eager retry is what causes the next failure.
-- Keep the "never loaded" and "failed to reload" states distinct — they call
-  for different behavior and different logging.
+- **Should this be on screen?** Follows the setting, and nothing else.
+- **What does it say right now?** Follows the data, with a placeholder for "no
+  reading yet" that keeps the same footprint so the layout doesn't jump.
+
+**Rules for anything polled and displayed:**
+
+- Never let data availability decide whether a UI element exists. Users read
+  presence as meaning, and a control that comes and goes on its own reads as a
+  bug even when every individual behavior is defensible.
+- A failed refresh leaves the last good value in place. Give it an explicit
+  staleness cutoff, and stop asserting confidence (severity colors, emphasis)
+  before you stop showing the value.
+- Recompute staleness when a poll completes, never at render time. A render
+  that consults the wall clock can change appearance between two repaints of
+  identical state — nondeterminism the user experiences as flicker.
+- Cache the last value on disk if the source is unreliable. It costs a few
+  lines and removes the "blank for the first N minutes after every restart"
+  window entirely.
+- Back *off* after a failure, never retry faster. Against a rate-limited
+  endpoint, an eager retry is what causes the next failure. Poll frequency is a
+  correctness concern when 429 means "no data", not just politeness.
+- Keep "never loaded" and "failed to reload" distinct — different behavior,
+  different logging.
+
+Logging earned its keep here: one `log::warn!` naming the API's own error tag
+turned "the pill is being weird" into `no reading in response
+(rate_limit_error)` in `~/Library/Logs/warp-oss.log`, which is the whole
+diagnosis.
 
 ---
 

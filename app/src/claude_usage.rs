@@ -7,36 +7,46 @@
 //! the main thread on a ~60s poll loop; on other platforms the Keychain lookup
 //! fails and the pill simply stays hidden.
 
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use warpui::r#async::Timer;
 use warpui::{Entity, ModelContext, SingletonEntity};
 
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
-const POLL_INTERVAL: Duration = Duration::from_secs(60);
 
-/// How long the last good reading keeps showing while refreshes are failing.
+/// Steady poll cadence.
 ///
-/// Usage moves slowly — the 5-hour window is 300 minutes — so a few stale
-/// minutes are harmless, and holding the number steady through a network blip
-/// is far better than blinking the pill out of existence. Past this age the
-/// figure could be misleading, so the pill hides rather than lie.
-const MAX_DISPLAY_AGE: Duration = Duration::from_secs(30 * 60);
+/// The endpoint is shared with Claude Code's own usage checks and rate-limits
+/// the account as a whole (HTTP 429), so polling cheaply is a correctness
+/// concern, not just politeness — a 429 carries no reading. Five minutes is
+/// ample for an ambient indicator of a 300-minute window.
+const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// Slowest the poll loop gets after repeated failures.
 ///
-/// Failures back *off* rather than retrying eagerly: the usage endpoint answers
-/// HTTP 429 when it's asked too often, and a 429 body carries no reading — so
-/// hammering it after a failure is what *causes* the next failure. Now that a
-/// failed poll leaves the last reading on screen, there is nothing to gain by
-/// hurrying. Capped low enough that the pill still appears within a few minutes
-/// of Claude Code being logged in on a machine that had no credentials.
-const MAX_POLL_BACKOFF: Duration = Duration::from_secs(5 * 60);
+/// Failures back *off* rather than retrying eagerly: against a rate-limited
+/// endpoint an eager retry is what produces the next failure, and with the last
+/// reading still on screen there is nothing to hurry for.
+const MAX_POLL_BACKOFF: Duration = Duration::from_secs(20 * 60);
+
+/// Age at which a reading stops being presented as current: it still shows, but
+/// muted and without its severity color, since usage may have moved since.
+const STALE_AFTER: Duration = Duration::from_secs(15 * 60);
+
+/// Age at which a reading is dropped entirely and the pill falls back to its
+/// placeholder. The pill itself stays put — only the figures go away.
+const MAX_DISPLAY_AGE: Duration = Duration::from_secs(2 * 60 * 60);
+
+/// Cache file holding the last reading, so a relaunch shows real figures
+/// immediately instead of waiting on a poll that may be rate-limited.
+const CACHE_FILE: &str = "claude_usage_cache.json";
 
 /// How close to a limit we are, for coloring the pill.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UsageSeverity {
     #[default]
     Normal,
@@ -74,7 +84,7 @@ impl UsageSeverity {
 }
 
 /// A single usage reading.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClaudeUsage {
     pub five_hour_pct: f32,
     pub weekly_pct: f32,
@@ -82,6 +92,10 @@ pub struct ClaudeUsage {
     pub weekly_resets_at: Option<String>,
     pub severity: UsageSeverity,
 }
+
+/// Stands in for the figures until a reading lands. Same shape as a real label
+/// so the pill keeps its size when data arrives instead of jumping.
+pub const PLACEHOLDER_LABEL: &str = "5h — · wk —";
 
 impl ClaudeUsage {
     /// Compact always-visible label, e.g. `5h 7% · wk 9%`.
@@ -126,27 +140,58 @@ pub enum ClaudeUsageEvent {
 /// in and out on its own.
 pub struct ClaudeUsageModel {
     usage: Option<ClaudeUsage>,
-    /// When `usage` was last refreshed, for the [`MAX_DISPLAY_AGE`] cutoff.
-    updated_at: Option<Instant>,
+    /// Wall-clock time the reading was taken. Wall clock rather than `Instant`
+    /// so a reading restored from disk can be aged across a restart.
+    taken_at: Option<SystemTime>,
+    /// True once the reading is older than [`STALE_AFTER`] — shown without its
+    /// severity color, since usage may have moved since it was taken.
+    ///
+    /// Recomputed only when a poll completes, never at render time, so the
+    /// pill's appearance can't change between two repaints of the same state.
+    stale: bool,
     /// Failed polls since the last success, for the backoff.
     consecutive_failures: u32,
 }
 
 impl ClaudeUsageModel {
+    /// Starts from the reading left by the previous launch, when there is one
+    /// recent enough to still mean something. The endpoint rate-limits, so the
+    /// first poll of a session often fails; without this the pill would sit on
+    /// its placeholder for minutes after every restart.
+    ///
+    /// A restored reading counts as stale from the outset — it is shown, but
+    /// its severity color isn't, until a live poll confirms it.
     pub fn new() -> Self {
+        Self::restoring(load_cached_reading(), SystemTime::now())
+    }
+
+    /// Builds a model around a reading recovered from disk, keeping it only
+    /// while it is recent enough to still mean something.
+    ///
+    /// Split from [`Self::new`] so the freshness rule can be tested without
+    /// depending on what happens to be cached on the machine running the tests.
+    fn restoring(cached: Option<(ClaudeUsage, SystemTime)>, now: SystemTime) -> Self {
+        let restored = cached.filter(|(_, taken_at)| age(*taken_at, now) < MAX_DISPLAY_AGE);
         Self {
-            usage: None,
-            updated_at: None,
+            stale: restored.is_some(),
+            usage: restored.as_ref().map(|(usage, _)| usage.clone()),
+            taken_at: restored.map(|(_, taken_at)| taken_at),
             consecutive_failures: 0,
         }
     }
 
     /// Read by the tab bar via `ClaudeUsageModel::as_ref(ctx).usage()`.
     ///
-    /// Pure: visibility only ever changes when a poll completes, so the pill
-    /// can't appear or vanish between two repaints of unchanged state.
+    /// Pure: the value only ever changes when a poll completes, so the pill
+    /// can't change between two repaints of unchanged state.
     pub fn usage(&self) -> Option<&ClaudeUsage> {
         self.usage.as_ref()
+    }
+
+    /// True when the current reading is old enough that its severity color
+    /// should not be trusted. Meaningless when [`Self::usage`] is `None`.
+    pub fn is_stale(&self) -> bool {
+        self.stale
     }
 
     /// Kick off the poll loop; call once from the singleton constructor.
@@ -159,31 +204,32 @@ impl ClaudeUsageModel {
     ///
     /// Separated from the async plumbing so the retain/expire policy is
     /// testable without a network or an app context.
-    fn record_poll(&mut self, fetched: Option<ClaudeUsage>, now: Instant) -> Duration {
+    fn record_poll(&mut self, fetched: Option<ClaudeUsage>, now: SystemTime) -> Duration {
         match fetched {
             Some(usage) => {
                 self.usage = Some(usage);
-                self.updated_at = Some(now);
+                self.taken_at = Some(now);
+                self.stale = false;
                 self.consecutive_failures = 0;
             }
             None => {
                 self.consecutive_failures = self.consecutive_failures.saturating_add(1);
-                // Keep showing the last reading — unless it is old enough that
-                // it would misinform rather than inform.
-                let expired = self
-                    .updated_at
-                    .is_some_and(|at| now.saturating_duration_since(at) >= MAX_DISPLAY_AGE);
-                if expired {
+                // Keep showing the last reading — but stop vouching for it once
+                // it ages, and drop it entirely once it would misinform.
+                let age = self.taken_at.map(|at| age(at, now));
+                self.stale = age.is_some_and(|age| age >= STALE_AFTER);
+                if age.is_some_and(|age| age >= MAX_DISPLAY_AGE) {
                     self.usage = None;
-                    self.updated_at = None;
+                    self.taken_at = None;
+                    self.stale = false;
                 }
             }
         }
         self.next_delay()
     }
 
-    /// Steady 60s cadence when healthy, doubling up to [`MAX_POLL_BACKOFF`]
-    /// while polls keep failing.
+    /// Steady [`POLL_INTERVAL`] cadence when healthy, doubling up to
+    /// [`MAX_POLL_BACKOFF`] while polls keep failing.
     fn next_delay(&self) -> Duration {
         if self.consecutive_failures == 0 {
             return POLL_INTERVAL;
@@ -195,18 +241,87 @@ impl ClaudeUsageModel {
     }
 
     fn refresh(&mut self, ctx: &mut ModelContext<Self>) {
-        ctx.spawn(async move { fetch_usage().await }, |me, usage, ctx| {
-            let delay = me.record_poll(usage, Instant::now());
-            ctx.emit(ClaudeUsageEvent::Updated);
-            ctx.notify();
-            // Re-arm the timer.
-            ctx.spawn(
-                async move {
-                    Timer::after(delay).await;
-                },
-                |me, _, ctx| me.refresh(ctx),
-            );
-        });
+        ctx.spawn(
+            async move {
+                let fetched = fetch_usage().await;
+                // Persisted here, on the background executor, so the main
+                // thread never waits on a file write.
+                if let Some(usage) = &fetched {
+                    save_cached_reading(usage, SystemTime::now());
+                }
+                fetched
+            },
+            |me, usage, ctx| {
+                let delay = me.record_poll(usage, SystemTime::now());
+                ctx.emit(ClaudeUsageEvent::Updated);
+                ctx.notify();
+                // Re-arm the timer.
+                ctx.spawn(
+                    async move {
+                        Timer::after(delay).await;
+                    },
+                    |me, _, ctx| me.refresh(ctx),
+                );
+            },
+        );
+    }
+}
+
+/// Elapsed wall-clock time between two instants, saturating at zero so a clock
+/// adjustment can't make a reading look like it came from the future.
+fn age(taken_at: SystemTime, now: SystemTime) -> Duration {
+    now.duration_since(taken_at).unwrap_or(Duration::ZERO)
+}
+
+/// The last reading, as persisted between launches.
+#[derive(Serialize, Deserialize)]
+struct CachedReading {
+    usage: ClaudeUsage,
+    /// Unix seconds; portable across restarts, unlike a monotonic instant.
+    taken_at_unix: u64,
+}
+
+fn cache_path() -> PathBuf {
+    warp_core::paths::data_dir().join(CACHE_FILE)
+}
+
+/// Reads the reading left behind by a previous launch, if it parses.
+///
+/// One small file read during singleton construction; deliberately not spawned,
+/// so the pill can render its real figures on the very first frame.
+fn load_cached_reading() -> Option<(ClaudeUsage, SystemTime)> {
+    load_cached_reading_from(&cache_path())
+}
+
+/// Records a reading for the next launch. Best-effort: a cache that can't be
+/// written costs a placeholder on next start and nothing else.
+fn save_cached_reading(usage: &ClaudeUsage, taken_at: SystemTime) {
+    save_cached_reading_to(&cache_path(), usage, taken_at);
+}
+
+fn load_cached_reading_from(path: &std::path::Path) -> Option<(ClaudeUsage, SystemTime)> {
+    let body = std::fs::read(path).ok()?;
+    let cached: CachedReading = serde_json::from_slice(&body).ok()?;
+    let taken_at = SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(cached.taken_at_unix))?;
+    Some((cached.usage, taken_at))
+}
+
+fn save_cached_reading_to(path: &std::path::Path, usage: &ClaudeUsage, taken_at: SystemTime) {
+    let Ok(since_epoch) = taken_at.duration_since(SystemTime::UNIX_EPOCH) else {
+        return;
+    };
+    let cached = CachedReading {
+        usage: usage.clone(),
+        taken_at_unix: since_epoch.as_secs(),
+    };
+    let Ok(body) = serde_json::to_vec(&cached) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(path, body) {
+        log::debug!("[claude_usage] could not cache reading: {e}");
     }
 }
 

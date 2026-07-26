@@ -569,6 +569,10 @@ const TAB_BAR_ICON_PADDING: f32 = 4.;
 
 const TAB_BAR_PILL_WIDTH: f32 = 100.;
 const PILL_FONT_SIZE: f32 = 12.;
+
+/// Opacity (percent) of the usage pill while it has no reading, or one too old
+/// to vouch for. Present and legible, but visibly not asserting a number.
+const MUTED_PILL_OPACITY: u8 = 45;
 // We use the word "Warp" in the Update Ready button to make it obvious that the terminal is Warp.
 // This can lead to free advertising when users screen-share Warp when an update is available.
 const UPDATE_READY_TEXT: &str = "Update Warp";
@@ -22127,8 +22131,13 @@ impl Workspace {
     }
 
     /// Always-visible pill showing the user's Claude usage (5-hour + weekly
-    /// limit percentages), colored by how close to a limit they are. Hidden
-    /// until the first reading arrives. Gated by `FeatureFlag::ClaudeUsage`.
+    /// limit percentages), colored by how close to a limit they are.
+    ///
+    /// Its presence follows the setting and nothing else: once enabled the pill
+    /// is always on screen, showing a placeholder until a reading lands. Tying
+    /// visibility to whether data had arrived made it blink in and out on its
+    /// own as polls succeeded and failed, with no pattern a user could read.
+    /// Gated by `FeatureFlag::ClaudeUsage`.
     fn render_usage_pill(
         &self,
         appearance: &Appearance,
@@ -22143,26 +22152,51 @@ impl Workspace {
             return None;
         }
 
-        let usage = crate::claude_usage::ClaudeUsageModel::as_ref(ctx).usage()?;
+        let model = crate::claude_usage::ClaudeUsageModel::as_ref(ctx);
+        let usage = model.usage();
+        // A reading we can no longer vouch for is shown, but not trusted.
+        let muted = usage.is_none() || model.is_stale();
+
+        let (label, tooltip_text) = match usage {
+            Some(usage) => {
+                let detail = usage.tooltip_text();
+                let detail = if muted {
+                    format!("{detail}\n\nRefresh is failing; these figures may be out of date.")
+                } else {
+                    detail
+                };
+                (usage.pill_label(), detail)
+            }
+            None => (
+                crate::claude_usage::PLACEHOLDER_LABEL.to_string(),
+                "Claude usage\nWaiting for the first reading.".to_string(),
+            ),
+        };
+
         // Stay neutral (matching the tab-bar text) when comfortably under a limit;
         // only warm to amber/red as usage climbs, so the pill reads as ambient
-        // information rather than an always-on alert.
-        let color = || match usage.severity {
-            crate::claude_usage::UsageSeverity::Critical => Fill::error(),
-            crate::claude_usage::UsageSeverity::Warning => Fill::warn(),
-            crate::claude_usage::UsageSeverity::Normal => appearance.theme().foreground(),
+        // information rather than an always-on alert. A stale or absent reading
+        // wears neither, so the pill never asserts a severity it can't back up.
+        let color = || {
+            if muted {
+                return appearance
+                    .theme()
+                    .foreground()
+                    .with_opacity(MUTED_PILL_OPACITY);
+            }
+            match usage.map(|usage| usage.severity) {
+                Some(crate::claude_usage::UsageSeverity::Critical) => Fill::error(),
+                Some(crate::claude_usage::UsageSeverity::Warning) => Fill::warn(),
+                _ => appearance.theme().foreground(),
+            }
         };
 
         let pill = Container::new(
             Flex::row()
                 .with_child(
-                    Text::new_inline(
-                        usage.pill_label(),
-                        appearance.ui_font_family(),
-                        PILL_FONT_SIZE,
-                    )
-                    .with_color(color().into())
-                    .finish(),
+                    Text::new_inline(label, appearance.ui_font_family(), PILL_FONT_SIZE)
+                        .with_color(color().into())
+                        .finish(),
                 )
                 .with_main_axis_size(MainAxisSize::Min)
                 .finish(),
@@ -22175,7 +22209,6 @@ impl Workspace {
         .finish();
 
         let ui_builder = appearance.ui_builder().clone();
-        let tooltip_text = usage.tooltip_text();
         let hoverable = Hoverable::new(self.mouse_states.usage_pill.clone(), |state| {
             let mut stack = Stack::new().with_child(pill);
             if state.is_hovered() {
