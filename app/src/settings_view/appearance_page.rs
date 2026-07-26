@@ -11,7 +11,8 @@ use warp_errors::{report_error, report_if_error};
 use warp_util::path::user_friendly_path;
 use warpui::elements::{
     Align, Border, ChildAnchor, ChildView, Clipped, ConstrainedBox, Container, CornerRadius,
-    CrossAxisAlignment, Dismiss, Element, Empty, Fill, Flex, FormattedTextElement, Hoverable,
+    CrossAxisAlignment, Dismiss, Element, Empty, Expanded, Fill, Flex, FormattedTextElement,
+    Hoverable,
     MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning, ParentElement,
     PositionedElementAnchor, PositionedElementOffsetBounds, Radius, SavePosition, Shrinkable, Stack,
     Text, Wrap, DEFAULT_UI_LINE_HEIGHT_RATIO,
@@ -5624,6 +5625,21 @@ fn with_color_picker_overlay(
 }
 
 /// A bordered single-line input box, styled to match the settings inputs.
+/// Width of the rule form's name field — room for "Jackson Enloe" and the
+/// "Client or project" placeholder without clipping either.
+const RULE_NAME_FIELD_WIDTH: f32 = 150.;
+
+/// Width of the rule form's keyword field. Keyword lists outgrow any fixed
+/// width, so the field scrolls with the cursor and is clipped to this box.
+const RULE_KEYWORDS_FIELD_WIDTH: f32 = 260.;
+
+/// A bordered single-line text field of a fixed width.
+///
+/// The editor is clipped to the box: a single-line editor lays its text out on
+/// one unbounded line and scrolls to follow the cursor, so without this the
+/// overflow paints straight through the border and across whatever sits beside
+/// it. Same `ConstrainedBox`-around-`Clipped` pairing the other embedded
+/// editors use.
 fn render_rule_input_box(
     editor: &ViewHandle<EditorView>,
     width: f32,
@@ -5631,7 +5647,7 @@ fn render_rule_input_box(
 ) -> Box<dyn Element> {
     let theme = appearance.theme();
     Container::new(
-        ConstrainedBox::new(ChildView::new(editor).finish())
+        ConstrainedBox::new(Clipped::new(ChildView::new(editor).finish()).finish())
             .with_width(width)
             .finish(),
     )
@@ -5687,10 +5703,9 @@ impl SettingsWidget for CustomTabColorsWidget {
         content.add_child(header);
 
         // Swatch strip + add button; the picker popover anchors underneath.
+        // Wraps, because the strip grows by one dot per color the user defines.
         let colors = custom_tab_colors(app);
-        let mut swatches = Flex::row()
-            .with_spacing(8.)
-            .with_cross_axis_alignment(CrossAxisAlignment::Center);
+        let mut swatch_children: Vec<Box<dyn Element>> = Vec::with_capacity(colors.len() + 1);
         for (idx, hex) in colors.iter().enumerate() {
             let Some(mouse_state) = view.custom_tab_color_swatch_states.get(idx).cloned() else {
                 continue;
@@ -5699,7 +5714,7 @@ impl SettingsWidget for CustomTabColorsWidget {
                 .unwrap_or_else(|_| pathfinder_color::ColorU::transparent_black());
             let is_being_edited =
                 view.color_picker_target == Some(ColorPickerTarget::EditPaletteColor(idx));
-            swatches.add_child(
+            swatch_children.push(
                 render_color_dot(
                     mouse_state,
                     dot_color,
@@ -5718,7 +5733,14 @@ impl SettingsWidget for CustomTabColorsWidget {
                 .finish(),
             );
         }
-        swatches.add_child(ChildView::new(&view.custom_color_add_button).finish());
+        swatch_children.push(ChildView::new(&view.custom_color_add_button).finish());
+        let swatches = Wrap::row()
+            .with_spacing(8.)
+            .with_run_spacing(8.)
+            .with_main_axis_alignment(MainAxisAlignment::Start)
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_children(swatch_children);
 
         let picker_open = matches!(
             view.color_picker_target,
@@ -5841,8 +5863,12 @@ impl SettingsWidget for ClaudeAutoColorsWidget {
                 .soft_wrap(false)
                 .finish(),
             );
+            // Keyword lists get long — seven or eight entries is normal for a
+            // client. Wrap them onto as many lines as they need rather than
+            // letting the row run off the edge of the settings pane; the whole
+            // point of the list is to check a rule at a glance.
             row.add_child(
-                Shrinkable::new(
+                Expanded::new(
                     1.,
                     Text::new(
                         rule.keywords.clone(),
@@ -5850,7 +5876,7 @@ impl SettingsWidget for ClaudeAutoColorsWidget {
                         appearance.ui_font_size(),
                     )
                     .with_color(theme.nonactive_ui_text_color().into())
-                    .soft_wrap(false)
+                    .soft_wrap(true)
                     .finish(),
                 )
                 .finish(),
@@ -5867,10 +5893,10 @@ impl SettingsWidget for ClaudeAutoColorsWidget {
         // Inline add/edit form: color swatch, name, keywords, save (+ cancel).
         let form_color = coloru_from_hex_string(&view.claude_rule_form_color)
             .unwrap_or_else(|_| pathfinder_color::ColorU::transparent_black());
-        let mut form = Flex::row()
-            .with_spacing(8.)
-            .with_cross_axis_alignment(CrossAxisAlignment::Center);
-        form.add_child(
+        // Wraps for the same reason as the swatch strip: a narrow settings pane
+        // should push the buttons onto a second line, not off the edge.
+        let mut form_children: Vec<Box<dyn Element>> = Vec::with_capacity(5);
+        form_children.push(
             render_color_dot(
                 view.claude_rule_form_swatch_state.clone(),
                 form_color,
@@ -5888,20 +5914,27 @@ impl SettingsWidget for ClaudeAutoColorsWidget {
             })
             .finish(),
         );
-        form.add_child(render_rule_input_box(
+        form_children.push(render_rule_input_box(
             &view.claude_rule_name_editor,
-            150.,
+            RULE_NAME_FIELD_WIDTH,
             appearance,
         ));
-        form.add_child(render_rule_input_box(
+        form_children.push(render_rule_input_box(
             &view.claude_rule_keywords_editor,
-            220.,
+            RULE_KEYWORDS_FIELD_WIDTH,
             appearance,
         ));
-        form.add_child(ChildView::new(&view.claude_rule_submit_button).finish());
+        form_children.push(ChildView::new(&view.claude_rule_submit_button).finish());
         if view.claude_rule_editing.is_some() {
-            form.add_child(ChildView::new(&view.claude_rule_cancel_button).finish());
+            form_children.push(ChildView::new(&view.claude_rule_cancel_button).finish());
         }
+        let form = Wrap::row()
+            .with_spacing(8.)
+            .with_run_spacing(8.)
+            .with_main_axis_alignment(MainAxisAlignment::Start)
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_children(form_children);
 
         content.add_child(with_color_picker_overlay(
             view,

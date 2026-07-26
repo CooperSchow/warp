@@ -17,7 +17,7 @@ use warpui::elements::{
     Flex, Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning, Padding,
     ParentAnchor, ParentElement, ParentOffsetBounds, PositionedElementAnchor,
     PositionedElementOffsetBounds, Radius, Rect, SavePosition, Shrinkable, SizeConstraintCondition,
-    SizeConstraintSwitch, Stack, Text,
+    SizeConstraintSwitch, Stack, Text, Wrap,
 };
 use warpui::fonts::Weight;
 use warpui::text_layout::ClipConfig;
@@ -808,6 +808,9 @@ impl ColorPickerTarget {
     }
 }
 
+/// Gap between color dots in the picker, horizontally and between wrapped rows.
+const COLOR_DOT_SPACING: f32 = 6.;
+
 /// The tab-color palette offered in the picker: the built-in ANSI colors,
 /// followed by the user's custom hex colors when the `CustomTabColors` feature
 /// is enabled. Invalid custom hex entries are skipped.
@@ -830,12 +833,15 @@ pub(crate) fn tab_color_palette(app: &AppContext) -> Vec<TabColor> {
     palette
 }
 
-/// Builds the shared dot-based color picker menu section (a single custom row)
-/// used by both the per-tab and per-group color selectors. The leading dot clears
-/// the color; the rest are the entries of `palette` (built-in ANSI colors plus any
+/// Builds the shared dot-based color picker menu section used by both the
+/// per-tab and per-group color selectors. The leading dot clears the color; the
+/// rest are the entries of `palette` (built-in ANSI colors plus any
 /// user-defined custom colors). `current_color` drives the selected-dot ring and
 /// the clear dot's toggle-off; `target` selects which toggle action is dispatched
 /// on click, either tab or group color selection.
+///
+/// The dots wrap onto as many rows as they need. The palette grows with every
+/// custom color the user defines, so a single row runs off the edge of the menu.
 pub(crate) fn color_picker_menu_items(
     current_color: Option<TabColor>,
     palette: Vec<TabColor>,
@@ -852,10 +858,7 @@ pub(crate) fn color_picker_menu_items(
                 let theme = appearance.theme();
                 let ring_color: ColorU = theme.accent().into();
 
-                let mut row = Flex::row()
-                    .with_main_axis_alignment(MainAxisAlignment::SpaceEvenly)
-                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                    .with_main_axis_size(MainAxisSize::Max);
+                let mut dots: Vec<Box<dyn Element>> = Vec::with_capacity(palette.len() + 1);
 
                 for (entry, mouse_state) in std::iter::once(None)
                     .chain(palette.iter().cloned().map(Some))
@@ -898,10 +901,17 @@ pub(crate) fn color_picker_menu_items(
                         ctx.dispatch_typed_action(MenuAction::Close(true));
                     });
 
-                    row.add_child(dot.finish());
+                    dots.push(dot.finish());
                 }
 
-                row.finish()
+                Wrap::row()
+                    .with_spacing(COLOR_DOT_SPACING)
+                    .with_run_spacing(COLOR_DOT_SPACING)
+                    .with_main_axis_alignment(MainAxisAlignment::Start)
+                    .with_main_axis_size(MainAxisSize::Max)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_children(dots)
+                    .finish()
             }),
             None,
         )
