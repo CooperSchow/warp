@@ -146,3 +146,150 @@ mod first_user_prompt_in_file {
         );
     }
 }
+
+mod bounded_reads {
+    use std::io::Write as _;
+
+    use super::super::{read_session_summary, HEAD_SCAN_BYTES};
+
+    /// A transcript far larger than the scan window must still be summarized,
+    /// and must not be read in full — this is what keeps the command palette
+    /// off a multi-second main-thread stall on a large Claude history.
+    #[test]
+    fn summarizes_a_huge_transcript_from_its_ends() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("huge.jsonl");
+        let mut file = std::fs::File::create(&path).expect("create");
+
+        writeln!(
+            file,
+            r#"{{"type":"user","cwd":"/tmp/proj","timestamp":"2026-07-01T00:00:00Z","message":{{"role":"user","content":"the first prompt"}}}}"#
+        )
+        .expect("write head");
+
+        // Bulk filler between the head and tail windows.
+        let filler = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{}"}}]}}}}"#,
+            "x".repeat(4096)
+        );
+        let mut written = 0u64;
+        while written < HEAD_SCAN_BYTES * 4 {
+            writeln!(file, "{filler}").expect("write filler");
+            written += filler.len() as u64 + 1;
+        }
+
+        writeln!(
+            file,
+            r#"{{"type":"ai-title","aiTitle":"Generated Title","sessionId":"huge"}}"#
+        )
+        .expect("write tail");
+        writeln!(
+            file,
+            r#"{{"type":"user","timestamp":"2026-07-09T12:00:00Z","message":{{"role":"user","content":"latest turn"}}}}"#
+        )
+        .expect("write tail turn");
+        drop(file);
+
+        let session = read_session_summary(&path).expect("summary");
+        assert_eq!(session.session_id, "huge");
+        assert_eq!(session.first_prompt.as_deref(), Some("the first prompt"));
+        assert_eq!(session.cwd.as_deref(), Some("/tmp/proj"));
+        // Title comes from the tail window.
+        assert_eq!(session.title.as_deref(), Some("Generated Title"));
+        assert_eq!(session.display_title(), "Generated Title");
+        // Timestamps come from both ends.
+        assert_eq!(
+            session.first_activity.as_deref(),
+            Some("2026-07-01T00:00:00Z")
+        );
+        assert_eq!(
+            session.last_activity.as_deref(),
+            Some("2026-07-09T12:00:00Z")
+        );
+    }
+
+    #[test]
+    fn small_transcripts_are_read_whole() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("small.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"user","cwd":"/tmp/p","timestamp":"2026-07-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
+                "\n",
+                r#"{"type":"assistant","timestamp":"2026-07-01T00:00:05Z","message":{"model":"claude-opus-5","content":[{"type":"text","text":"hi"}]}}"#,
+                "\n",
+            ),
+        )
+        .expect("write");
+
+        let session = read_session_summary(&path).expect("summary");
+        assert_eq!(session.first_prompt.as_deref(), Some("hello"));
+        assert_eq!(session.message_count, 2);
+        assert!(session.models.contains("claude-opus-5"));
+    }
+
+    #[test]
+    fn subagent_transcripts_are_skipped() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("agent-sub.jsonl");
+        std::fs::write(&path, "{}\n").expect("write");
+        assert!(read_session_summary(&path).is_none());
+    }
+}
+
+mod real_store_bench {
+    use std::io::BufRead as _;
+    use std::time::Instant;
+
+    use super::super::{
+        claude_projects_dir, list_transcript_paths, parse_session, read_session_summary,
+    };
+
+    /// Compares the old "parse every transcript in full" behaviour against the
+    /// bounded head/tail summary, using whatever is in the developer's real
+    /// `~/.claude/projects`. Ignored by default because it depends on local
+    /// data; run it explicitly when tuning the scan windows.
+    #[test]
+    #[ignore = "benchmark against the local ~/.claude store"]
+    fn compare_full_parse_vs_bounded_summary() {
+        let Some(root) = claude_projects_dir().filter(|r| r.is_dir()) else {
+            println!("no ~/.claude/projects; skipping");
+            return;
+        };
+        let paths = list_transcript_paths(&root);
+        let total_bytes: u64 = paths
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum();
+        println!(
+            "store: {} transcripts, {:.1} MB",
+            paths.len(),
+            total_bytes as f64 / 1_048_576.0
+        );
+
+        let started = Instant::now();
+        for path in &paths {
+            let Ok(file) = std::fs::File::open(path) else {
+                continue;
+            };
+            let lines = std::io::BufReader::new(file).lines().map_while(Result::ok);
+            let _ = parse_session("id".to_string(), "dir".to_string(), lines);
+        }
+        let full = started.elapsed();
+
+        let started = Instant::now();
+        for path in &paths {
+            let _ = read_session_summary(path);
+        }
+        let bounded = started.elapsed();
+
+        println!("full parse (old):      {full:?}");
+        println!("bounded summary (new): {bounded:?}");
+        println!(
+            "speedup: {:.1}x",
+            full.as_secs_f64() / bounded.as_secs_f64().max(f64::EPSILON)
+        );
+    }
+}

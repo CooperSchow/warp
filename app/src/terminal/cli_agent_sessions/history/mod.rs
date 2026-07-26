@@ -8,11 +8,12 @@
 //! them in a new tab. It reads Claude's files directly (no new persistence),
 //! so it also surfaces sessions started before this feature existed.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::env;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde_json::Value;
 use walkdir::WalkDir;
@@ -340,88 +341,94 @@ pub fn first_user_prompt_in_file(path: &Path) -> Option<String> {
     None
 }
 
-/// Read every resume-able Claude Code session under `projects_root`, newest first.
+/// Bytes read from the start of a transcript when summarizing it for the
+/// conversation list. Everything the list needs from the beginning of a session
+/// (cwd, the first user prompt, the start timestamp) is in the first handful of
+/// lines.
+const HEAD_SCAN_BYTES: u64 = 64 * 1024;
+
+/// Bytes read from the end of a transcript when summarizing it. Claude appends
+/// its generated `ai-title` and the newest turns at the end, so a small tail is
+/// enough for the title and the last-activity timestamp.
+const TAIL_SCAN_BYTES: u64 = 32 * 1024;
+
+/// Every transcript path under `projects_root` that could be a resumable
+/// session, in no particular order. Skips `agent-*` (subagent Task transcripts).
 ///
-/// Skips `agent-*` files (subagent Task transcripts, not top-level resumable
-/// sessions) and sessions with fewer than two human turns (empty/metadata-only).
-pub fn read_claude_sessions(projects_root: &Path) -> Vec<ClaudeSession> {
-    let mut sessions: HashMap<String, ClaudeSession> = HashMap::new();
+/// Cheap — a directory walk with no file reads — so callers can use it to
+/// detect changes before paying for [`read_session_summary`].
+pub fn list_transcript_paths(projects_root: &Path) -> Vec<PathBuf> {
+    WalkDir::new(projects_root)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                return None;
+            }
+            let stem = path.file_stem()?.to_str()?;
+            if stem.starts_with("agent-") {
+                return None;
+            }
+            Some(path.to_path_buf())
+        })
+        .collect()
+}
 
-    for entry in WalkDir::new(projects_root).into_iter().filter_map(Result::ok) {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let Some(session_id) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
-            continue;
-        };
-        // `agent-*` files are subagent/Task transcripts, not top-level resumable
-        // sessions — skip them outright.
-        if session_id.starts_with("agent-") {
-            continue;
-        }
-        let project_dir = path
-            .parent()
-            .and_then(Path::file_name)
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+/// Summarize one transcript for the conversation list.
+///
+/// Reads only a bounded slice from each end of the file rather than the whole
+/// thing: transcripts routinely reach tens or hundreds of megabytes, and this
+/// runs on the main thread via the command palette's sync data source, so a
+/// full parse is a multi-second UI freeze. The head yields cwd / first prompt /
+/// start time; the tail yields the generated title and the latest timestamp.
+///
+/// Consequently `message_count` and `models` reflect only the scanned slices
+/// and must not be treated as exact totals.
+pub fn read_session_summary(path: &Path) -> Option<ClaudeSession> {
+    let session_id = path.file_stem()?.to_str()?.to_owned();
+    if session_id.starts_with("agent-") {
+        return None;
+    }
+    let project_dir = path
+        .parent()
+        .and_then(Path::file_name)
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
 
-        let Ok(file) = File::open(path) else {
-            continue;
-        };
-        let lines = BufReader::new(file)
-            .lines()
-            .map_while(Result::ok);
-        let parsed = parse_session(session_id.clone(), project_dir, lines);
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
 
-        // A session can span multiple files (rare); merge by id, keeping the
-        // richest fields.
-        match sessions.get_mut(&session_id) {
-            Some(existing) => merge_session(existing, parsed),
-            None => {
-                sessions.insert(session_id, parsed);
+    let mut session = {
+        let head = BufReader::new((&file).take(HEAD_SCAN_BYTES));
+        parse_session(
+            session_id,
+            project_dir,
+            head.lines().map_while(Result::ok),
+        )
+    };
+
+    if len > HEAD_SCAN_BYTES {
+        let tail_start = len.saturating_sub(TAIL_SCAN_BYTES);
+        if file.seek(SeekFrom::Start(tail_start)).is_ok() {
+            let mut lines = BufReader::new(&file).lines().map_while(Result::ok);
+            if tail_start > 0 {
+                // The seek lands mid-line; drop that partial line.
+                let _ = lines.next();
+            }
+            for line in lines {
+                ingest_line(&mut session, &line);
             }
         }
     }
 
-    let mut resumable: Vec<ClaudeSession> = sessions
-        .into_values()
-        .filter(|s| s.message_count >= 2)
-        .collect();
-    // Newest activity first; None sorts last.
-    resumable.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
-    resumable
+    Some(session)
 }
 
-fn merge_session(into: &mut ClaudeSession, other: ClaudeSession) {
-    into.message_count += other.message_count;
-    into.models.extend(other.models);
-    if into.cwd.is_none() {
-        into.cwd = other.cwd;
-    }
-    if into.title.is_none() {
-        into.title = other.title;
-    }
-    if into.first_prompt.is_none() {
-        into.first_prompt = other.first_prompt;
-    }
-    if other.last_activity > into.last_activity {
-        into.last_activity = other.last_activity;
-    }
-    match (&into.first_activity, &other.first_activity) {
-        (None, _) => into.first_activity = other.first_activity,
-        (Some(cur), Some(o)) if o < cur => into.first_activity = other.first_activity,
-        _ => {}
-    }
-}
-
-/// Convenience: resolve the projects dir and read all sessions. Empty if the
-/// Claude store can't be located or doesn't exist.
-pub fn load_claude_sessions() -> Vec<ClaudeSession> {
-    match claude_projects_dir() {
-        Some(root) if root.is_dir() => read_claude_sessions(&root),
-        Some(_) | None => Vec::new(),
-    }
+/// Modification time of `path`, used to skip re-reading transcripts that
+/// haven't changed since they were last summarized.
+pub fn transcript_mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).ok()?.modified().ok()
 }
 
 #[cfg(test)]

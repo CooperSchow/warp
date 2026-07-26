@@ -440,6 +440,18 @@ debug = "line-tables-only"
 split-debuginfo = "unpacked"
 
 [profile.dev.package]
+# Eqho fork: we install dev builds into ~/Applications/WarpOss.app (see
+# script/dev-install.sh), so unlike upstream — where a dev build is only ever
+# run from a terminal for debugging — this profile is what we actually *use*
+# day to day. At opt-level 0 the UI crates are slow enough to beachball on
+# ordinary interactions (opening Settings, rendering the tab bar). opt-level 1
+# removes that at a modest compile-time cost; going higher mostly buys compile
+# time, not responsiveness.
+warp.opt-level = 1
+warpui_core.opt-level = 1
+warp_core.opt-level = 1
+warp_editor.opt-level = 1
+ui_components.opt-level = 1
 # Improve the performance of core terminal logic.
 warp_terminal.opt-level = 3
 # Minimize the runtime overhead of CPU profiling at the cost of a small
