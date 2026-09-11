@@ -439,6 +439,10 @@ fn enabled_features() -> HashSet<FeatureFlag> {
         FeatureFlag::CustomTabColors,
         #[cfg(feature = "claude_auto_tab_colors")]
         FeatureFlag::ClaudeAutoTabColors,
+        #[cfg(feature = "starred_tabs")]
+        FeatureFlag::StarredTabs,
+        #[cfg(feature = "tab_mark_unread")]
+        FeatureFlag::TabMarkUnread,
         #[cfg(feature = "open_warp_new_settings_modes")]
         FeatureFlag::OpenWarpNewSettingsModes,
         #[cfg(feature = "hoa_code_review")]

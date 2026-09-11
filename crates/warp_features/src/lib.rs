@@ -760,6 +760,17 @@ pub enum FeatureFlag {
     /// ▸ Tabs). Mutually exclusive with directory-based tab colors at runtime.
     ClaudeAutoTabColors,
 
+    /// Enables starring tabs, the fork's favorites: a star before the title,
+    /// starred tabs kept together at the top of the tab list, and bulk closes
+    /// that spare them. Built on the `PinnedTabs` engine, so it needs that flag
+    /// too.
+    StarredTabs,
+
+    /// Enables marking a tab unread, and read again, by hand. The mark is the
+    /// same dot an agent leaves when it finishes, and a shortcut jumps to the
+    /// next unread tab.
+    TabMarkUnread,
+
     /// Enables the new settings to control visibility of Warp Drive, Code Review Panel,
     /// and Project Explorer & Global Search features.
     OpenWarpNewSettingsModes,
@@ -1003,6 +1014,8 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::ClaudeConversations,
     FeatureFlag::ClaudeUsage,
     FeatureFlag::ClaudeAutoTabColors,
+    FeatureFlag::StarredTabs,
+    FeatureFlag::TabMarkUnread,
 ];
 
 /// Features enabled for feature preview build users (e.g.: Friends of Warp).
