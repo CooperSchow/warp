@@ -320,6 +320,9 @@ pub enum Icon {
     Pin,
     PinFilled,
     PinFilledDiagonal,
+    /// The starred-tab mark: a solid five-point star, drawn on a 20-unit grid
+    /// for its 10 px size.
+    StarFilled,
     Atom,
     Cognition,
     Dataflow04,
@@ -345,6 +348,7 @@ impl From<Icon> for &'static str {
             Icon::Pin => "bundled/svg/pin-01.svg",
             Icon::PinFilled => "bundled/svg/pin-filled.svg",
             Icon::PinFilledDiagonal => "bundled/svg/pin-filled-diagonal.svg",
+            Icon::StarFilled => "bundled/svg/star-filled.svg",
             Icon::AtSign => "bundled/svg/at-sign.svg",
             Icon::Plus => "bundled/svg/plus.svg",
             Icon::Copy => "bundled/svg/copy.svg",

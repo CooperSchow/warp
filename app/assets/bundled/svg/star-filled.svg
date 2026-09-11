@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20" fill="none">
+  <!-- A regular five-point star: the inner radius is 0.382 of the outer, so each arm's top edge runs
+       level with the inner vertices, on y = 8. Drawn at 10 px, one unit here is one Retina pixel. The
+       star's centre sits half a pixel below the box's, so beside a 12 px title it spans the capitals'
+       height with about the same small overshoot above and below. -->
+  <path d="M10 1.09L12.245 8H19.511L13.633 12.271L15.878 19.18L10 14.91L4.122 19.18L6.367 12.271L0.489 8H7.755Z" fill="#121212"/>
+</svg>

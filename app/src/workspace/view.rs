@@ -29450,19 +29450,15 @@ const GROUP_HEADER_PIN_EDGE_GAP: f32 = 8.0;
 /// Right padding reserving the pin's footprint so the name clips before it.
 const GROUP_HEADER_PIN_PADDING: f32 = GROUP_HEADER_PIN_EDGE_GAP + TAB_PIN_INDICATOR_ICON_SIZE;
 
-/// The diagonal pin indicator overlaid on a pinned group's header.
-/// trailing the members of an expanded group, or to the right of the name on a
-/// collapsed group's header.
+/// The diagonal pin indicator (the star, with stars on) overlaid on a pinned
+/// group's header, trailing the members of an expanded group, or to the right
+/// of the name on a collapsed group's header.
 fn render_horizontal_group_pin_indicator(appearance: &Appearance) -> Box<dyn Element> {
     let theme = appearance.theme();
-    ConstrainedBox::new(
-        starred_tabs::pin_or_star_icon()
-            .to_warpui_icon(theme.main_text_color(theme.background()))
-            .finish(),
+    starred_tabs::render_pin_slot_mark(
+        TAB_PIN_INDICATOR_ICON_SIZE,
+        theme.main_text_color(theme.background()),
     )
-    .with_width(TAB_PIN_INDICATOR_ICON_SIZE)
-    .with_height(TAB_PIN_INDICATOR_ICON_SIZE)
-    .finish()
 }
 
 /// Renders the icon block for a tab-group header from 0-4 deduped pane kinds.

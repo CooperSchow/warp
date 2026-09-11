@@ -35,6 +35,10 @@ use warpui::ui_components::components::{UiComponent, UiComponentStyles};
 use warpui::ui_components::text_input::TextInput;
 use warpui::{AppContext, EntityId, SingletonEntity, ViewHandle, WindowId};
 
+use super::starred_tabs::{
+    render_star, row_shows_star, shows_pin_overlay, starred_divider_position, STAR_SLOT_WIDTH,
+    STAR_TITLE_GAP,
+};
 use super::tab_unread::{row_shows_unread, tab_is_unread};
 use super::{render_group_member_icon_collage, select_unique_pane_kinds};
 use crate::ai::agent::conversation::{ConversationStatus, StatusColorStyle};
@@ -412,9 +416,10 @@ fn render_pane_row_element(
         is_pinned,
         container_is_hovered,
         row_unread: _,
+        shows_star: _,
     } = props;
     let is_selected = is_active_tab && is_focused;
-    let show_pin = FeatureFlag::PinnedTabs.is_enabled() && is_pinned && !container_is_hovered;
+    let show_pin = shows_pin_overlay(is_pinned, container_is_hovered);
     let mut row = Hoverable::new(mouse_state, move |state| {
         // Hovered or selected rows always fully round; otherwise derive the
         // resting radius from the row's stack position.
@@ -883,6 +888,10 @@ struct PaneProps<'a> {
     container_is_hovered: bool,
     /// Whether this row shows the unread dot (see `tab_unread::row_shows_unread`).
     row_unread: bool,
+    /// Whether this row wears its tab's star (see `starred_tabs::row_shows_star`).
+    /// False until the renderer, which knows where the row falls in its tab,
+    /// sets it.
+    shows_star: bool,
 }
 
 struct PaneRowState {
@@ -1950,12 +1959,22 @@ fn render_groups(
         groups = groups.with_spacing(TABS_MODE_ITEM_SPACING);
     }
 
+    // A hairline closes the starred block when both it and the tabs after it
+    // have rows showing. A group's run never straddles the block's edge.
+    let starred_divider_at = starred_divider_position(
+        visible_tabs.iter().map(|(tab_index, _)| *tab_index),
+        workspace.starred_boundary(),
+    );
+
     // Consecutive tabs sharing a group_id collapse into a single group container.
     // TODO(johnturcoo) adopt horizontal tabs 'tab slot' pattern to remove this while loop.
     let total_visible = visible_tabs.len();
     let mut i = 0;
     while i < total_visible {
         let (tab_index, ref filtered_pane_ids) = visible_tabs[i];
+        if starred_divider_at == Some(i) {
+            groups.add_child(render_starred_divider(uses_outer_group_container, theme));
+        }
         if ghost_insertion_index == Some(tab_index) {
             groups.add_child(render_ghost_vertical_tab_slot(workspace, app));
         }
@@ -2242,7 +2261,7 @@ fn render_tab_group_internal(
                     }
                     handles[..branch_line_count].to_vec()
                 };
-                let Some(pane_props) = PaneProps::new(
+                let Some(mut pane_props) = PaneProps::new(
                     pane_group,
                     *pane_id,
                     pane_group_id,
@@ -2271,6 +2290,8 @@ fn render_tab_group_internal(
                 ) else {
                     return Empty::new().finish();
                 };
+                // A Summary card is its tab's one row.
+                pane_props.shows_star = row_shows_star(tab.pinned, true);
                 rows.add_child(render_summary_tab_item(
                     pane_props,
                     summary
@@ -2336,6 +2357,7 @@ fn render_tab_group_internal(
                         is_last: row_idx + 1 == total_rows,
                     };
                 }
+                pane_props.shows_star = row_shows_star(tab.pinned, row_idx == 0);
                 let view_mode = *TabSettings::as_ref(app).vertical_tabs_view_mode.value();
                 let row = match view_mode {
                     VerticalTabsViewMode::Compact => render_compact_pane_row(pane_props, app),
@@ -2842,12 +2864,14 @@ fn render_grouped_tabs_header(
         .with_clip(ClipConfig::ellipsis())
         .with_color(sub_text_color.into())
         .finish();
+    // A starred group's header is the group's one row, so it wears the star.
+    let shows_star = row_shows_star(group.pinned, true);
     let text_column: Box<dyn Element> = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Start)
         .with_spacing(1.)
-        .with_child(title_element)
-        .with_child(subtitle)
+        .with_child(title_with_star(title_element, shows_star, theme))
+        .with_child(under_star(subtitle, shows_star))
         .finish();
 
     let action_buttons = if show_action_buttons {
@@ -2885,7 +2909,7 @@ fn render_grouped_tabs_header(
         Empty::new().finish()
     };
 
-    let group_pinned = FeatureFlag::PinnedTabs.is_enabled() && group.pinned;
+    let show_pin = shows_pin_overlay(group.pinned, show_action_buttons);
     let row = Flex::row()
         .with_main_axis_size(MainAxisSize::Max)
         .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
@@ -2938,7 +2962,7 @@ fn render_grouped_tabs_header(
         // Pin indicator anchored at the visible top-right corner, matching
         // the per-tab pin placement. Hidden whenever the action buttons
         // are visible so the two never overlap.
-        if group_pinned && !show_action_buttons {
+        if show_pin {
             let pin_icon = ConstrainedBox::new(
                 WarpIcon::PinFilledDiagonal
                     .to_warpui_icon(sub_text_color)
@@ -3416,6 +3440,84 @@ fn render_title_indicator(theme: &WarpTheme) -> Box<dyn Element> {
     .finish()
 }
 
+/// Line 1 of a row that wears its tab's star: the star in the title's ink, then
+/// the title, which keeps its own clipping in the width left. The star's box is
+/// centred on the title's line, which its glyph is drawn to sit on. Any other
+/// row's line 1 is the title alone, untouched.
+fn title_with_star(
+    title: Box<dyn Element>,
+    shows_star: bool,
+    theme: &WarpTheme,
+) -> Box<dyn Element> {
+    if !shows_star {
+        return title;
+    }
+    Flex::row()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_child(
+            Container::new(render_star(theme.main_text_color(theme.background())))
+                .with_margin_right(STAR_TITLE_GAP)
+                .finish(),
+        )
+        .with_child(Shrinkable::new(1., title).finish())
+        .finish()
+}
+
+/// A later line of a row that wears its tab's star, indented by the star's slot
+/// so its text starts where the title's does rather than under the star. Any
+/// other row's lines are untouched.
+fn under_star(line: Box<dyn Element>, shows_star: bool) -> Box<dyn Element> {
+    if shows_star {
+        Container::new(line)
+            .with_margin_left(STAR_SLOT_WIDTH)
+            .finish()
+    } else {
+        line
+    }
+}
+
+/// Space above and below the starred block's hairline in the card layouts, on
+/// top of the list's own 4 px spacing: a 13 px break, against 4 px between rows.
+const STARRED_DIVIDER_MARGIN: f32 = 2.;
+
+/// In the Panes layout, the gap between the line that closes the starred block
+/// and the next tab's own top line.
+const STARRED_DIVIDER_PANES_GAP: f32 = 8.;
+
+/// The hairline that closes the starred block. In the card layouts (Tabs and
+/// Summary) it's this panel's divider, the settings popup's 1 px `fg_overlay_2`
+/// line, spanning the rows' width. In the Panes layout, where full-bleed
+/// `fg_overlay_1` lines already divide the tabs, it closes the block with that
+/// same line, and a gap before the next tab's line marks the break.
+fn render_starred_divider(uses_outer_group_container: bool, theme: &WarpTheme) -> Box<dyn Element> {
+    let (fill, margin_top, margin_bottom) = if uses_outer_group_container {
+        (
+            internal_colors::fg_overlay_1(theme),
+            0.,
+            STARRED_DIVIDER_PANES_GAP,
+        )
+    } else {
+        (
+            internal_colors::fg_overlay_2(theme),
+            STARRED_DIVIDER_MARGIN,
+            STARRED_DIVIDER_MARGIN,
+        )
+    };
+    Container::new(
+        ConstrainedBox::new(
+            Container::new(Empty::new().finish())
+                .with_background(fill)
+                .finish(),
+        )
+        .with_height(1.)
+        .finish(),
+    )
+    .with_margin_top(margin_top)
+    .with_margin_bottom(margin_bottom)
+    .finish()
+}
+
 fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
     let effective_subtitle = props.subtitle.clone();
     let appearance = Appearance::as_ref(app);
@@ -3452,19 +3554,23 @@ fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
         title_row.add_child(
             Shrinkable::new(
                 1.,
-                render_pane_title_slot(
-                    &props,
-                    || {
-                        Text::new_inline(props.displayed_title().to_string(), font_family, 12.)
-                            .with_clip(ClipConfig::ellipsis())
-                            .with_color(theme.main_text_color(theme.background()).into())
-                            .finish()
-                    },
-                    12.,
-                    theme.main_text_color(theme.background()),
-                    ClipConfig::ellipsis(),
-                    appearance,
-                    app,
+                title_with_star(
+                    render_pane_title_slot(
+                        &props,
+                        || {
+                            Text::new_inline(props.displayed_title().to_string(), font_family, 12.)
+                                .with_clip(ClipConfig::ellipsis())
+                                .with_color(theme.main_text_color(theme.background()).into())
+                                .finish()
+                        },
+                        12.,
+                        theme.main_text_color(theme.background()),
+                        ClipConfig::ellipsis(),
+                        appearance,
+                        app,
+                    ),
+                    props.shows_star,
+                    theme,
                 ),
             )
             .finish(),
@@ -3489,12 +3595,13 @@ fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
             } else {
                 ClipConfig::ellipsis()
             };
-            content_col.add_child(
+            content_col.add_child(under_star(
                 Text::new_inline(effective_subtitle, font_family, 12.)
                     .with_clip(subtitle_clip)
                     .with_color(theme.sub_text_color(theme.background()).into())
                     .finish(),
-            );
+                props.shows_star,
+            ));
         }
 
         content_col.finish()
@@ -3873,6 +3980,7 @@ impl<'a> PaneProps<'a> {
             is_pinned,
             container_is_hovered,
             row_unread: row_shows_unread(pane_group, pane_id, display_granularity, app),
+            shows_star: false,
         })
     }
 
@@ -4426,6 +4534,7 @@ fn render_terminal_row_content(
         }
     };
 
+    let first_line = title_with_star(first_line, props.shows_star, theme);
     let first_line_element = if props.row_unread {
         Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
@@ -4446,8 +4555,11 @@ fn render_terminal_row_content(
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Start);
     content.add_child(first_line_element);
-    content.add_child(Container::new(second_line).with_margin_top(2.).finish());
-    content.add_child(
+    content.add_child(under_star(
+        Container::new(second_line).with_margin_top(2.).finish(),
+        props.shows_star,
+    ));
+    content.add_child(under_star(
         Container::new(render_terminal_metadata_line(
             terminal_view,
             props.pane_group_id,
@@ -4460,7 +4572,8 @@ fn render_terminal_row_content(
         ))
         .with_margin_top(2.)
         .finish(),
-    );
+        props.shows_star,
+    ));
     content.finish()
 }
 
@@ -4664,6 +4777,9 @@ fn render_summary_tab_item(
     let mut title_region = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Start);
+    // A starred tab's card leads its first line with the star, and indents every
+    // line after it to line up with that line's text.
+    let shows_star = props.shows_star;
     if let Some(title_override) = render_title_override(
         &props,
         12.,
@@ -4672,13 +4788,12 @@ fn render_summary_tab_item(
         appearance,
         app,
     ) {
-        title_region.add_child(title_override);
+        title_region.add_child(title_with_star(title_override, shows_star, theme));
     } else if summary.primary_labels.is_empty() {
-        title_region.add_child(render_text_line(
-            &props.title,
-            main_text_color,
-            ClipConfig::end(),
-            appearance,
+        title_region.add_child(title_with_star(
+            render_text_line(&props.title, main_text_color, ClipConfig::end(), appearance),
+            shows_star,
+            theme,
         ));
     } else {
         let visible_labels: Vec<&VerticalTabsSummaryPrimaryLabel> = summary
@@ -4696,18 +4811,21 @@ fn render_summary_tab_item(
                 appearance,
             );
             title_region.add_child(if idx == 0 {
-                line
+                title_with_star(line, shows_star, theme)
             } else {
-                Container::new(line)
-                    .with_margin_top(INTRA_REGION_GAP)
-                    .finish()
+                under_star(
+                    Container::new(line)
+                        .with_margin_top(INTRA_REGION_GAP)
+                        .finish(),
+                    shows_star,
+                )
             });
         }
 
         let hidden_label_count =
             summary_overflow_count(summary.primary_labels.len(), MAX_VISIBLE_PRIMARY_LABELS);
         if hidden_label_count > 0 {
-            title_region.add_child(
+            title_region.add_child(under_star(
                 Container::new(render_summary_overflow_line(
                     hidden_label_count,
                     sub_text_color,
@@ -4715,7 +4833,8 @@ fn render_summary_tab_item(
                 ))
                 .with_margin_top(INTRA_REGION_GAP)
                 .finish(),
-            );
+                shows_star,
+            ));
         }
     }
     let title_region = title_region.finish();
@@ -4753,7 +4872,7 @@ fn render_summary_tab_item(
         } else {
             INTRA_REGION_GAP
         };
-        text_col.add_child(
+        text_col.add_child(under_star(
             Container::new(render_text_line(
                 working_dir,
                 sub_text_color,
@@ -4762,7 +4881,8 @@ fn render_summary_tab_item(
             ))
             .with_margin_top(margin)
             .finish(),
-        );
+            shows_star,
+        ));
     }
     let hidden_directory_count = summary_overflow_count(
         summary.working_directories.len(),
@@ -4774,7 +4894,7 @@ fn render_summary_tab_item(
         } else {
             INTRA_REGION_GAP
         };
-        text_col.add_child(
+        text_col.add_child(under_star(
             Container::new(render_summary_overflow_line(
                 hidden_directory_count,
                 sub_text_color,
@@ -4782,7 +4902,8 @@ fn render_summary_tab_item(
             ))
             .with_margin_top(margin)
             .finish(),
-        );
+            shows_star,
+        ));
     }
 
     // Branch region. Each branch line gets the existing 4px top margin from APP-3875.
@@ -4793,7 +4914,7 @@ fn render_summary_tab_item(
         .take(MAX_VISIBLE_BRANCH_LINES)
         .enumerate()
     {
-        text_col.add_child(
+        text_col.add_child(under_star(
             Container::new(render_summary_branch_line(
                 branch_entry,
                 pr_badge_mouse_states.get(idx).cloned(),
@@ -4802,13 +4923,14 @@ fn render_summary_tab_item(
             ))
             .with_margin_top(REGION_GAP)
             .finish(),
-        );
+            shows_star,
+        ));
     }
 
     let hidden_branch_count =
         summary_overflow_count(summary.branch_entries.len(), MAX_VISIBLE_BRANCH_LINES);
     if hidden_branch_count > 0 {
-        text_col.add_child(
+        text_col.add_child(under_star(
             Container::new(render_summary_overflow_line(
                 hidden_branch_count,
                 sub_text_color,
@@ -4816,7 +4938,8 @@ fn render_summary_tab_item(
             ))
             .with_margin_top(REGION_GAP)
             .finish(),
-        );
+            shows_star,
+        ));
     }
 
     let content = Flex::row()
@@ -7304,6 +7427,8 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
             };
             (title, subtitle)
         };
+    let title_element = title_with_star(title_element, props.shows_star, theme);
+    let subtitle_element = subtitle_element.map(|subtitle| under_star(subtitle, props.shows_star));
 
     // Title row with optional indicator
     let title_row = if has_indicator {

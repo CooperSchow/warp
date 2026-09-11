@@ -51,7 +51,7 @@ use crate::workspace::tab_group::{TabGroup, TabGroupId};
 use crate::workspace::tab_settings::{
     TabCloseButtonPosition, TabSettings, VerticalTabsDisplayGranularity,
 };
-use crate::workspace::view::starred_tabs::starred_tabs_enabled;
+use crate::workspace::view::starred_tabs::{render_pin_slot_mark, starred_tabs_enabled};
 use crate::workspace::view::tab_unread::{
     row_shows_unread, row_terminal_view, tab_mark_target, tab_unread_terminal_views,
 };
@@ -1654,20 +1654,15 @@ impl<'a> TabComponent<'a> {
                 })
                 .finish()
         } else if !is_narrow && self.show_pin_indicator() {
-            // Pinned: render the pin in the exact slot the close button uses so
-            // hovering swaps icons in place without changing the layout.
+            // Pinned: render the pin, or the star with stars on, in the exact
+            // slot the close button uses so hovering swaps icons in place
+            // without changing the layout.
             let theme = self.appearance.theme();
             ConstrainedBox::new(
-                Align::new(
-                    ConstrainedBox::new(
-                        Icon::PinFilledDiagonal
-                            .to_warpui_icon(theme.main_text_color(theme.background()))
-                            .finish(),
-                    )
-                    .with_width(TAB_PIN_INDICATOR_ICON_SIZE)
-                    .with_height(TAB_PIN_INDICATOR_ICON_SIZE)
-                    .finish(),
-                )
+                Align::new(render_pin_slot_mark(
+                    TAB_PIN_INDICATOR_ICON_SIZE,
+                    theme.main_text_color(theme.background()),
+                ))
                 .finish(),
             )
             .with_width(ICON_DIMENSIONS)
