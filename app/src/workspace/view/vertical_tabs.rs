@@ -712,6 +712,10 @@ pub(super) struct VerticalTabsPanelState {
     new_tab_hover_state: MouseStateHandle,
     new_tab_button_state: MouseStateHandle,
     pub(super) search_query: String,
+    /// The search the panel last rendered and the tabs it showed for it, by
+    /// pane group, so ⌘J can keep to them without matching again, which reads
+    /// terminal state under its lock.
+    search_matches: RefCell<Option<(String, Vec<EntityId>)>>,
     settings_button_mouse_state: MouseStateHandle,
     panes_segment_mouse_state: MouseStateHandle,
     tabs_segment_mouse_state: MouseStateHandle,
@@ -750,6 +754,7 @@ impl Default for VerticalTabsPanelState {
             new_tab_hover_state: Default::default(),
             new_tab_button_state: Default::default(),
             search_query: String::new(),
+            search_matches: RefCell::default(),
             settings_button_mouse_state: Default::default(),
             panes_segment_mouse_state: Default::default(),
             tabs_segment_mouse_state: Default::default(),
@@ -773,6 +778,25 @@ impl Default for VerticalTabsPanelState {
 }
 
 impl VerticalTabsPanelState {
+    /// Records the tabs a render showed for `query`, by pane group.
+    pub(super) fn record_search_matches(&self, query: &str, pane_group_ids: Vec<EntityId>) {
+        *self.search_matches.borrow_mut() = Some((query.to_owned(), pane_group_ids));
+    }
+
+    /// The tabs the search shows, by pane group, as of the panel's last render
+    /// for the current query. `None` while no search filters the list, and
+    /// before the panel has rendered the current query.
+    pub(super) fn tabs_matching_search(&self) -> Option<Vec<EntityId>> {
+        if self.search_query.is_empty() {
+            return None;
+        }
+        self.search_matches
+            .borrow()
+            .as_ref()
+            .filter(|(query, _)| *query == self.search_query)
+            .map(|(_, pane_group_ids)| pane_group_ids.clone())
+    }
+
     /// Returns a lightweight handle bundle for workspace-level visibility reconciliation while the
     /// detail sidecar is active.
     pub(super) fn detail_hover_state(&self, window_id: WindowId) -> VerticalTabsDetailHoverState {
@@ -1885,6 +1909,17 @@ fn render_groups(
             })
             .collect()
     };
+    // ⌘J keeps to the tabs a search shows, and reads them from here rather
+    // than matching again.
+    if !query.is_empty() {
+        state.record_search_matches(
+            query,
+            visible_tabs
+                .iter()
+                .map(|(tab_index, _)| workspace.tabs[*tab_index].pane_group.id())
+                .collect(),
+        );
+    }
 
     if visible_tabs.is_empty() {
         if query.is_empty() {
