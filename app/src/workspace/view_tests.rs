@@ -4765,3 +4765,324 @@ fn claude_auto_color_suppresses_directory_tab_colors_while_enabled() {
         });
     });
 }
+
+/// With stars off, the tab menu and the tab-group menu keep upstream's width.
+/// With them on, both open wider, and wider still in the horizontal tab bar,
+/// whose close labels are longer.
+#[test]
+fn the_tab_menus_keep_upstreams_width_unless_stars_are_on() {
+    for vertical in [false, true] {
+        assert_eq!(
+            Workspace::tab_menu_width(false, vertical),
+            crate::menu::DEFAULT_WIDTH,
+            "stars off, vertical {vertical}"
+        );
+        assert!(
+            Workspace::tab_menu_width(true, vertical) > crate::menu::DEFAULT_WIDTH,
+            "stars on, vertical {vertical}"
+        );
+    }
+    assert!(Workspace::tab_menu_width(true, false) > Workspace::tab_menu_width(true, true));
+}
+
+/// Each menu that shares the tab menu's view opens at its own width: the tab
+/// menu and the group menu at the width for their tab bar, and the
+/// multi-selection menu, whose items are upstream's, at upstream's.
+#[test]
+fn the_tab_menus_open_at_the_width_for_their_tab_bar() {
+    use pathfinder_geometry::vector::Vector2F;
+
+    let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
+    let _vertical_tabs = FeatureFlag::VerticalTabs.override_enabled(true);
+    let _groups = FeatureFlag::GroupedTabs.override_enabled(true);
+    for stars in [false, true] {
+        let _stars = FeatureFlag::StarredTabs.override_enabled(stars);
+        App::test((), |mut app| async move {
+            initialize_app(&mut app);
+            let workspace = mock_workspace(&mut app);
+            let group_id = workspace.update(&mut app, |workspace, ctx| {
+                while workspace.tab_count() < 3 {
+                    workspace.add_terminal_tab(false, ctx);
+                }
+                workspace.handle_action(&WorkspaceAction::NewTabGroupFromTab(2), ctx);
+                workspace.tabs[2].group_id.expect("tab 2 is grouped")
+            });
+            for vertical in [false, true] {
+                TabSettings::handle(&app).update(&mut app, |settings, ctx| {
+                    report_if_error!(settings.use_vertical_tabs.set_value(vertical, ctx));
+                });
+                workspace.update(&mut app, |workspace, ctx| {
+                    let anchor = TabContextMenuAnchor::Pointer(Vector2F::zero());
+                    let expected = Workspace::tab_menu_width(stars, vertical);
+                    let context = format!("stars {stars}, vertical {vertical}");
+
+                    workspace.toggle_tab_right_click_menu(1, anchor, ctx);
+                    assert_eq!(
+                        workspace.tab_right_click_menu.as_ref(ctx).width(),
+                        expected,
+                        "the tab menu, {context}"
+                    );
+                    workspace.toggle_tab_right_click_menu(1, anchor, ctx);
+
+                    workspace.toggle_tab_selection_right_click_menu(1, anchor, ctx);
+                    assert_eq!(
+                        workspace.tab_right_click_menu.as_ref(ctx).width(),
+                        crate::menu::DEFAULT_WIDTH,
+                        "the multi-selection menu, {context}"
+                    );
+                    workspace.toggle_tab_selection_right_click_menu(1, anchor, ctx);
+
+                    workspace.toggle_tab_group_right_click_menu(group_id, anchor, ctx);
+                    assert_eq!(
+                        workspace.tab_right_click_menu.as_ref(ctx).width(),
+                        expected,
+                        "the group menu, {context}"
+                    );
+                    workspace.toggle_tab_group_right_click_menu(group_id, anchor, ctx);
+                });
+            }
+        });
+    }
+}
+
+/// Every label and key hint in `items`, skipping separators and the colour row.
+#[cfg(target_os = "macos")]
+fn collect_menu_labels(
+    items: &[MenuItem<WorkspaceAction>],
+    labels: &mut std::collections::BTreeSet<(String, Option<String>)>,
+) {
+    for item in items {
+        match item {
+            MenuItem::Item(fields)
+            | MenuItem::Submenu { fields, .. }
+            | MenuItem::Header { fields, .. } => {
+                if !fields.label().is_empty() {
+                    labels.insert((
+                        fields.label().to_owned(),
+                        fields.key_shortcut_label().map(str::to_owned),
+                    ));
+                }
+            }
+            MenuItem::ItemsRow { .. } | MenuItem::Separator => {}
+        }
+    }
+}
+
+/// Every label the tab menu and the tab-group menu can show, with its key hint,
+/// fits the width the menu opens at in that tab bar: laid out in the menu's own
+/// font, the bundled Roboto at the UI font size, with the items' usual padding
+/// on each side and at least that much again between a label and its hint. And
+/// the widest of them needs nearly all of that width, so the width is just
+/// enough. The labels come from the menus' own builders: the tab menu over every
+/// list of up to six tabs with every length of starred block, each of its tabs,
+/// active or not, grouped, starred or neither, in both tab bars and both
+/// vertical layouts; and the group menu for a group below the starred block and
+/// for a starred group with a starred tab after it.
+#[cfg(target_os = "macos")]
+#[test]
+fn every_label_the_tab_menus_can_show_fits_the_width_they_open_at() {
+    use std::collections::BTreeSet;
+
+    use warpui::assets::AssetProvider as _;
+    use warpui::elements::DEFAULT_UI_LINE_HEIGHT_RATIO;
+    use warpui::fonts::Properties;
+    use warpui::platform::{FontDB as _, LineStyle};
+    use warpui::text_layout::{ClipConfig, StyleAndFont, TextStyle, DEFAULT_TOP_BOTTOM_RATIO};
+
+    use crate::menu::MENU_ITEM_HORIZONTAL_PADDING;
+    use crate::tab::PaneNameMenuTarget;
+
+    let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
+    let _stars = FeatureFlag::StarredTabs.override_enabled(true);
+    let _unread = FeatureFlag::TabMarkUnread.override_enabled(true);
+    let _vertical_tabs = FeatureFlag::VerticalTabs.override_enabled(true);
+    let _groups = FeatureFlag::GroupedTabs.override_enabled(true);
+    let _configs = FeatureFlag::TabConfigs.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let mut labels: HashMap<bool, BTreeSet<(String, Option<String>)>> = HashMap::new();
+
+        for (vertical, granularity) in [
+            (false, VerticalTabsDisplayGranularity::Tabs),
+            (true, VerticalTabsDisplayGranularity::Tabs),
+            (true, VerticalTabsDisplayGranularity::Panes),
+        ] {
+            TabSettings::handle(&app).update(&mut app, |settings, ctx| {
+                report_if_error!(settings.use_vertical_tabs.set_value(vertical, ctx));
+                report_if_error!(settings
+                    .vertical_tabs_display_granularity
+                    .set_value(granularity, ctx));
+            });
+            let workspace = mock_workspace(&mut app);
+            let found = labels.entry(vertical).or_default();
+            workspace.update(&mut app, |workspace, ctx| {
+                let tab = &workspace.tabs[0];
+                let locator = PaneViewLocator {
+                    pane_group_id: tab.pane_group.id(),
+                    pane_id: tab.pane_group.as_ref(ctx).focused_pane_id(ctx),
+                };
+                let targets = [
+                    None,
+                    Some(PaneNameMenuTarget {
+                        locator,
+                        rename_label: "Rename active pane",
+                        reset_label: "Reset active pane name",
+                        is_pane_row: false,
+                    }),
+                    Some(PaneNameMenuTarget {
+                        locator,
+                        rename_label: "Rename pane",
+                        reset_label: "Reset pane name",
+                        is_pane_row: true,
+                    }),
+                ];
+                for (pinned, grouped) in [(false, false), (false, true), (true, false)] {
+                    workspace.tabs[0].pinned = pinned;
+                    workspace.tabs[0].group_id = grouped.then(TabGroupId::new);
+                    for tab_count in 1..=6usize {
+                        for starred in 0..=tab_count {
+                            for index in 0..tab_count {
+                                for is_active_tab in [false, true] {
+                                    for target in targets {
+                                        let items = workspace.tabs[0]
+                                            .menu_items_with_pane_name_target(
+                                                index,
+                                                tab_count,
+                                                starred,
+                                                is_active_tab,
+                                                &HashMap::new(),
+                                                false,
+                                                index > 0,
+                                                index + 1 < tab_count,
+                                                target,
+                                                ctx,
+                                            );
+                                        collect_menu_labels(&items, found);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                workspace.tabs[0].pinned = false;
+                workspace.tabs[0].group_id = None;
+            });
+        }
+
+        for vertical in [false, true] {
+            TabSettings::handle(&app).update(&mut app, |settings, ctx| {
+                report_if_error!(settings.use_vertical_tabs.set_value(vertical, ctx));
+                report_if_error!(settings
+                    .vertical_tabs_display_granularity
+                    .set_value(VerticalTabsDisplayGranularity::Tabs, ctx));
+            });
+            let workspace = mock_workspace(&mut app);
+            let found = labels.entry(vertical).or_default();
+            workspace.update(&mut app, |workspace, ctx| {
+                while workspace.tab_count() < 6 {
+                    workspace.add_terminal_tab(false, ctx);
+                }
+                let colors = Appearance::as_ref(ctx).theme().terminal_colors().normal;
+                // A group below a starred tab: its closes above and outside it
+                // spare that tab.
+                workspace.pin_tab(0, ctx);
+                workspace.handle_action(&WorkspaceAction::NewTabGroupFromTab(2), ctx);
+                let group_id = workspace.tabs[2].group_id.expect("tab 2 is grouped");
+                workspace.handle_action(
+                    &WorkspaceAction::MoveTabToGroup {
+                        tab_index: 3,
+                        group_id,
+                    },
+                    ctx,
+                );
+                collect_menu_labels(
+                    &workspace.tab_group_menu_items(group_id, vertical, colors, ctx),
+                    found,
+                );
+                // The group starred, with a starred tab after it: its closes
+                // below and outside it spare that one too.
+                workspace.handle_action(&WorkspaceAction::PinTabGroup(group_id), ctx);
+                let last = workspace.tab_count() - 1;
+                workspace.pin_tab(last, ctx);
+                collect_menu_labels(
+                    &workspace.tab_group_menu_items(group_id, vertical, colors, ctx),
+                    found,
+                );
+            });
+        }
+
+        // The sweep reached the longest labels either tab bar can show.
+        let has_label =
+            |vertical: bool, label: &str| labels[&vertical].iter().any(|(text, _)| text == label);
+        assert!(has_label(true, "Close Tabs Below (keep starred)"));
+        assert!(has_label(true, "Close tabs above (keep starred)"));
+        assert!(has_label(true, "Close tabs below (keep starred)"));
+        assert!(has_label(false, "Close Tabs to the Right (keep starred)"));
+        assert!(has_label(false, "Close tabs to the right (keep starred)"));
+        assert!(has_label(false, "Close tabs to the left (keep starred)"));
+        assert!(labels[&true]
+            .iter()
+            .any(|(text, hint)| text == "Star tab (leaves group)" && hint.is_some()));
+
+        let font_size = app.update(|ctx| Appearance::as_ref(ctx).ui_builder().ui_font_size());
+        let mut font_db = warpui::platform::mac::FontDB::new();
+        let faces = [
+            "bundled/fonts/roboto/Roboto-Italic.ttf",
+            "bundled/fonts/roboto/Roboto-Bold.ttf",
+            "bundled/fonts/roboto/Roboto-Regular.ttf",
+            "bundled/fonts/roboto/Roboto-Medium.ttf",
+            "bundled/fonts/roboto/RobotoFlex-Semibold.ttf",
+            "bundled/fonts/roboto/Roboto-BoldItalic.ttf",
+        ]
+        .map(|path| crate::ASSETS.get(path).expect("Roboto is bundled").to_vec())
+        .to_vec();
+        let roboto = font_db
+            .load_from_bytes("Roboto", faces)
+            .expect("the bundled Roboto loads");
+        let width_of = |text: &str| {
+            font_db
+                .text_layout_system()
+                .layout_line(
+                    text,
+                    LineStyle {
+                        font_size,
+                        line_height_ratio: DEFAULT_UI_LINE_HEIGHT_RATIO,
+                        baseline_ratio: DEFAULT_TOP_BOTTOM_RATIO,
+                        fixed_width_tab_size: None,
+                    },
+                    &[(
+                        0..text.chars().count(),
+                        StyleAndFont::new(roboto, Properties::default(), TextStyle::new()),
+                    )],
+                    f32::MAX,
+                    ClipConfig::default(),
+                )
+                .width
+        };
+
+        for vertical in [false, true] {
+            let width = Workspace::tab_menu_width(true, vertical);
+            let mut widest = (0., String::new());
+            for (label, hint) in &labels[&vertical] {
+                let need = 2. * MENU_ITEM_HORIZONTAL_PADDING
+                    + width_of(label)
+                    + hint
+                        .as_deref()
+                        .map_or(0., |hint| MENU_ITEM_HORIZONTAL_PADDING + width_of(hint));
+                assert!(
+                    need <= width,
+                    "\"{label}\" ({hint:?}) needs {need} px, more than the {width} px the menu \
+                     opens at (vertical {vertical})"
+                );
+                if need > widest.0 {
+                    widest = (need, label.clone());
+                }
+            }
+            assert!(
+                width - widest.0 < 1.,
+                "{width} px is more than the widest label needs: {widest:?} (vertical {vertical})"
+            );
+        }
+    });
+}

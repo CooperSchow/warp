@@ -506,6 +506,10 @@ impl Workspace {
 
         let menu_items = self.tab_selection_menu_items();
         ctx.update_view(&self.tab_right_click_menu, |context_menu, view_ctx| {
+            // This menu shares its view with the tab menu, which opens wider
+            // with stars on. Its own items are upstream's, so it keeps
+            // upstream's width.
+            context_menu.set_width(crate::menu::DEFAULT_WIDTH);
             context_menu.set_items(menu_items, view_ctx);
         });
         self.show_tab_right_click_menu = None;

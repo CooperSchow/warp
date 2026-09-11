@@ -2341,6 +2341,12 @@ impl<A: Action + Clone> Menu<A> {
     pub fn set_width(&mut self, width: f32) {
         self.submenu_width = width;
     }
+
+    /// The width the menu opens at.
+    #[cfg(test)]
+    pub fn width(&self) -> f32 {
+        self.submenu_width
+    }
     pub fn set_width_match_position_id(&mut self, position_id: Option<String>) {
         self.width_match_position_id = position_id;
     }

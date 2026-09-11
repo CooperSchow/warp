@@ -7904,6 +7904,29 @@ impl Workspace {
             == 1
     }
 
+    /// The tab menu's width in the vertical tabs panel with stars on: just
+    /// enough for the widest label it can show, "Close Tabs Below (keep
+    /// starred)", 171.8 px in the menu's 12 px Roboto, plus the items' 14 px
+    /// padding on each side. The group menu's widest, "Close tabs above (keep
+    /// starred)", is narrower.
+    const STARRED_TAB_MENU_WIDTH_VERTICAL: f32 = 200.;
+
+    /// The same in the horizontal tab bar, whose widest label is "Close Tabs to
+    /// the Right (keep starred)", 200.2 px.
+    const STARRED_TAB_MENU_WIDTH_HORIZONTAL: f32 = 229.;
+
+    /// How wide the tab menu and the tab-group menu open. Upstream's width cut
+    /// the fork's "(keep starred)" labels off mid-word, so with stars on both
+    /// open just wide enough for the widest label either can show in this tab
+    /// bar. With stars off they keep upstream's width.
+    fn tab_menu_width(stars_on: bool, vertical: bool) -> f32 {
+        match (stars_on, vertical) {
+            (false, _) => crate::menu::DEFAULT_WIDTH,
+            (true, true) => Self::STARRED_TAB_MENU_WIDTH_VERTICAL,
+            (true, false) => Self::STARRED_TAB_MENU_WIDTH_HORIZONTAL,
+        }
+    }
+
     pub fn toggle_tab_right_click_menu(
         &mut self,
         tab_index: usize,
@@ -7934,7 +7957,12 @@ impl Workspace {
                 ctx,
             )
         };
+        let width = Self::tab_menu_width(
+            starred_tabs::starred_tabs_enabled(),
+            uses_vertical_tabs(ctx),
+        );
         ctx.update_view(&self.tab_right_click_menu, |context_menu, view_ctx| {
+            context_menu.set_width(width);
             context_menu.set_items(menu_items, view_ctx);
         });
         self.show_tab_group_right_click_menu = None;
@@ -7959,9 +7987,11 @@ impl Workspace {
         }
 
         let terminal_colors = Appearance::as_ref(ctx).theme().terminal_colors().normal;
-        let menu_items =
-            self.tab_group_menu_items(group_id, uses_vertical_tabs(ctx), terminal_colors, ctx);
+        let vertical = uses_vertical_tabs(ctx);
+        let menu_items = self.tab_group_menu_items(group_id, vertical, terminal_colors, ctx);
+        let width = Self::tab_menu_width(starred_tabs::starred_tabs_enabled(), vertical);
         ctx.update_view(&self.tab_right_click_menu, |context_menu, view_ctx| {
+            context_menu.set_width(width);
             context_menu.set_items(menu_items, view_ctx);
         });
         self.show_tab_right_click_menu = None;
@@ -8025,7 +8055,12 @@ impl Workspace {
             ctx,
         );
 
+        let width = Self::tab_menu_width(
+            starred_tabs::starred_tabs_enabled(),
+            uses_vertical_tabs(ctx),
+        );
         ctx.update_view(&self.tab_right_click_menu, |context_menu, view_ctx| {
+            context_menu.set_width(width);
             context_menu.set_items(menu_items, view_ctx);
         });
         self.show_tab_right_click_menu = Some((tab_index, TabContextMenuAnchor::Pointer(position)));
