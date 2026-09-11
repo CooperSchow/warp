@@ -15,6 +15,8 @@ use serde_json::Value;
 use warpui::r#async::Timer;
 use warpui::{Entity, ModelContext, SingletonEntity};
 
+use crate::channel::{Channel, ChannelState};
+
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 
@@ -195,7 +197,14 @@ impl ClaudeUsageModel {
     }
 
     /// Kick off the poll loop; call once from the singleton constructor.
+    ///
+    /// Never in integration tests: they run the real app against a throwaway
+    /// `HOME`, but a poll reads Claude Code's credential from the login
+    /// keychain and spends the account's rate limit on the live endpoint.
     pub fn start_polling(&mut self, ctx: &mut ModelContext<Self>) {
+        if ChannelState::channel() == Channel::Integration {
+            return;
+        }
         self.refresh(ctx);
     }
 
