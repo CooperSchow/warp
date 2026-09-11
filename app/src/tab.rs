@@ -52,7 +52,9 @@ use crate::workspace::tab_settings::{
     TabCloseButtonPosition, TabSettings, VerticalTabsDisplayGranularity,
 };
 use crate::workspace::view::starred_tabs::starred_tabs_enabled;
-use crate::workspace::view::tab_unread::{row_shows_unread, tab_unread_terminal_views};
+use crate::workspace::view::tab_unread::{
+    row_shows_unread, row_terminal_view, tab_mark_target, tab_unread_terminal_views,
+};
 use crate::workspace::view::{
     TOGGLE_ACTIVE_TAB_STAR_BINDING_NAME, TOGGLE_ACTIVE_TAB_UNREAD_BINDING_NAME,
 };
@@ -243,6 +245,9 @@ pub struct PaneNameMenuTarget {
     pub locator: PaneViewLocator,
     pub rename_label: &'static str,
     pub reset_label: &'static str,
+    /// Whether the menu was opened on the pane's own row, rather than on its
+    /// tab, which names the tab's active pane.
+    pub is_pane_row: bool,
 }
 
 /// TabData struct holds the state of the given tab. It includes the pane group and mouse states
@@ -740,8 +745,9 @@ impl TabData {
 
     /// "Mark as Unread", or "Mark as Read" when the row the menu was opened on
     /// shows the unread dot. A pane's own row (Panes granularity) targets that
-    /// pane; every other entry point targets the whole tab. Hidden when the
-    /// target has no terminal pane.
+    /// pane; every other entry point, a right-click on the tab around its pane
+    /// rows included, targets the whole tab. Hidden when the target has no
+    /// terminal pane.
     fn unread_menu_item(
         &self,
         pane_name_target: Option<PaneNameMenuTarget>,
@@ -752,7 +758,9 @@ impl TabData {
         }
         let pane_group = self.pane_group.as_ref(ctx);
         let row_pane_id = pane_name_target
-            .filter(|target| self.pane_group.id() == target.locator.pane_group_id)
+            .filter(|target| {
+                target.is_pane_row && self.pane_group.id() == target.locator.pane_group_id
+            })
             .map(|target| target.locator.pane_id);
         let granularity = uses_vertical_tabs(ctx).then(|| {
             *TabSettings::as_ref(ctx)
@@ -762,7 +770,7 @@ impl TabData {
         let (terminal_view_id, is_unread) = match (granularity, row_pane_id) {
             // A pane's own row: that pane, and that row's dot.
             (Some(granularity @ VerticalTabsDisplayGranularity::Panes), Some(pane_id)) => {
-                let terminal_view = pane_group.terminal_view_from_pane_id(pane_id, ctx)?;
+                let terminal_view = row_terminal_view(pane_group, pane_id, ctx)?;
                 (
                     Some(terminal_view.id()),
                     row_shows_unread(pane_group, pane_id, granularity, ctx),
@@ -776,13 +784,14 @@ impl TabData {
                     row_shows_unread(pane_group, pane_id, granularity, ctx),
                 )
             }
-            // No single row: the kebab over a tab's pane rows, or the
-            // horizontal tab bar, which draws no dot. The whole tab.
+            // No single row: the kebab over a tab's pane rows, a right-click on
+            // the tab around them, or the horizontal tab bar, which draws no
+            // dot. The whole tab.
             (Some(VerticalTabsDisplayGranularity::Panes), None) | (None, _) => {
                 (None, !tab_unread_terminal_views(pane_group, ctx).is_empty())
             }
         };
-        if terminal_view_id.is_none() && pane_group.terminal_views(ctx).is_empty() {
+        if terminal_view_id.is_none() && tab_mark_target(pane_group, ctx).is_none() {
             return None;
         }
 

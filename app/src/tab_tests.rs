@@ -179,6 +179,7 @@ fn tab_menu_is_unchanged_with_tab_mark_flags_off() {
                                     locator,
                                     rename_label: "Rename active pane",
                                     reset_label: "Reset active pane name",
+                                    is_pane_row: false,
                                 }),
                             ),
                             (
@@ -187,6 +188,7 @@ fn tab_menu_is_unchanged_with_tab_mark_flags_off() {
                                     locator,
                                     rename_label: "Rename pane",
                                     reset_label: "Reset pane name",
+                                    is_pane_row: true,
                                 }),
                             ),
                         ] {

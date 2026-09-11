@@ -35,6 +35,14 @@ impl WorkspaceRegistry {
         self.workspaces.remove(&window_id);
     }
 
+    /// Whether a workspace is registered for the window: from the workspace's
+    /// creation until its window closes. Unlike `get`, it doesn't need the
+    /// workspace to be reachable, so it holds while that workspace is being
+    /// updated.
+    pub fn is_registered(&self, window_id: WindowId) -> bool {
+        self.workspaces.contains_key(&window_id)
+    }
+
     /// Returns the workspace for the given window, if it is still alive.
     pub fn get(
         &self,

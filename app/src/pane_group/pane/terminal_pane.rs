@@ -452,6 +452,22 @@ impl PaneContent for TerminalPane {
         // `attach` will re-register via `register_agent_view_controller` when the tab is
         // restored, so this is safe to run unconditionally.
         let terminal_view_id = self.terminal_view(ctx).id();
+
+        // A pane closed for good takes its unread mark with it. One hidden
+        // while its close can be undone, or moved, keeps it.
+        match detach_type {
+            DetachType::Closed => {
+                if ctx.has_singleton_model::<AgentNotificationsModel>() {
+                    AgentNotificationsModel::handle(ctx).update(ctx, |model, ctx| {
+                        for closed in terminal_view_ids.iter().copied().chain([terminal_view_id]) {
+                            model.forget_terminal_view(closed, ctx);
+                        }
+                    });
+                }
+            }
+            DetachType::HiddenForClose | DetachType::Moved => {}
+        }
+
         ActiveAgentViewsModel::handle(ctx).update(ctx, |model, ctx| {
             for terminal_view_id in terminal_view_ids {
                 model.unregister_agent_view_controller(terminal_view_id, ctx);

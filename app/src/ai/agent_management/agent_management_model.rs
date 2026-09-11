@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use warp_core::features::FeatureFlag;
 use warpui::{AppContext, Entity, EntityId, ModelContext, SingletonEntity, ViewHandle, WindowId};
@@ -28,6 +28,16 @@ pub struct AgentNotificationsModel {
     /// Artifacts accumulated during the current turn for each conversation.
     /// Drained into the notification when a terminal state fires, cleared on InProgress.
     pub(crate) pending_artifacts: HashMap<AIConversationId, Vec<Artifact>>,
+    /// Terminal views marked unread by hand. A mark holds until its view is
+    /// arrived at, replied to, marked read, or closed for good.
+    manually_unread: HashSet<EntityId>,
+    /// Marks restored with their panes: shown as unread, but out of reach of
+    /// focus reports until restore commits them.
+    staged_unread: HashSet<EntityId>,
+    /// The terminal last reported focused in each window's active tab, `None`
+    /// while a non-terminal pane has focus. A window has no entry until its
+    /// first report, which is a baseline rather than an arrival.
+    last_focus_by_window: HashMap<WindowId, Option<EntityId>>,
 }
 
 impl Entity for AgentNotificationsModel {
@@ -56,6 +66,9 @@ impl AgentNotificationsModel {
         Self {
             notifications: NotificationItems::default(),
             pending_artifacts: HashMap::new(),
+            manually_unread: HashSet::new(),
+            staged_unread: HashSet::new(),
+            last_focus_by_window: HashMap::new(),
         }
     }
 
@@ -97,8 +110,11 @@ impl AgentNotificationsModel {
     /// looked at. The one predicate behind a tab row's dot, the tab menu's
     /// Mark as Read label and ⌘J.
     pub(crate) fn is_unread(&self, terminal_view_id: EntityId) -> bool {
-        self.notifications
-            .has_unread_for_terminal_view(terminal_view_id)
+        self.manually_unread.contains(&terminal_view_id)
+            || self.staged_unread.contains(&terminal_view_id)
+            || self
+                .notifications
+                .has_unread_for_terminal_view(terminal_view_id)
     }
 
     /// Whether a snapshot records the terminal view as unread. It records the
@@ -111,22 +127,45 @@ impl AgentNotificationsModel {
             && Self::as_ref(app).is_unread(terminal_view_id)
     }
 
+    /// Whether any restored mark is still waiting to be committed.
+    pub(crate) fn has_staged_marks(&self) -> bool {
+        !self.staged_unread.is_empty()
+    }
+
     /// Marks the terminal views unread by hand. A mark holds until its view is
     /// arrived at, replied to, marked read, or closed for good.
     pub(crate) fn mark_unread(
         &mut self,
-        _terminal_view_ids: &[EntityId],
-        _ctx: &mut ModelContext<Self>,
+        terminal_view_ids: &[EntityId],
+        ctx: &mut ModelContext<Self>,
     ) {
+        let mut changed = false;
+        for terminal_view_id in terminal_view_ids {
+            changed |= self.manually_unread.insert(*terminal_view_id);
+        }
+        if changed {
+            ctx.emit(AgentManagementEvent::NotificationUpdated);
+        }
     }
 
     /// Clears the terminal views' manual and restored marks, and marks their
     /// notifications read.
     pub(crate) fn mark_read(
         &mut self,
-        _terminal_view_ids: &[EntityId],
-        _ctx: &mut ModelContext<Self>,
+        terminal_view_ids: &[EntityId],
+        ctx: &mut ModelContext<Self>,
     ) {
+        let mut changed = false;
+        for terminal_view_id in terminal_view_ids {
+            changed |= self.manually_unread.remove(terminal_view_id);
+            changed |= self.staged_unread.remove(terminal_view_id);
+        }
+        if changed {
+            ctx.emit(AgentManagementEvent::NotificationUpdated);
+        }
+        for terminal_view_id in terminal_view_ids {
+            self.mark_items_from_terminal_view_read(*terminal_view_id, ctx);
+        }
     }
 
     /// Records the terminal focused in `window_id`'s active tab (`None` when a
@@ -136,41 +175,110 @@ impl AgentNotificationsModel {
     /// inactive window never clear one.
     pub(crate) fn record_terminal_focus(
         &mut self,
-        _window_id: WindowId,
-        _focused_terminal_view_id: Option<EntityId>,
-        _is_active_window: bool,
-        _ctx: &mut ModelContext<Self>,
+        window_id: WindowId,
+        focused_terminal_view_id: Option<EntityId>,
+        is_active_window: bool,
+        ctx: &mut ModelContext<Self>,
     ) {
+        self.forget_closed_windows(window_id, ctx);
+        let previous = self
+            .last_focus_by_window
+            .insert(window_id, focused_terminal_view_id);
+        let Some(focused) = focused_terminal_view_id else {
+            return;
+        };
+        let arrived =
+            is_active_window && previous.is_some_and(|previous| previous != Some(focused));
+        if arrived && self.manually_unread.remove(&focused) {
+            ctx.emit(AgentManagementEvent::NotificationUpdated);
+        }
+    }
+
+    /// Drops the focus recorded for windows that have closed, which
+    /// `WindowClosed` doesn't name. A window's workspace is registered from its
+    /// creation until the window closes. The reporting window always stays,
+    /// since it may be reporting from inside its creation, before it's
+    /// registered.
+    fn forget_closed_windows(&mut self, reporting_window_id: WindowId, app: &AppContext) {
+        if !app.has_singleton_model::<WorkspaceRegistry>() {
+            return;
+        }
+        let registry = WorkspaceRegistry::as_ref(app);
+        self.last_focus_by_window.retain(|window_id, _| {
+            *window_id == reporting_window_id || registry.is_registered(*window_id)
+        });
     }
 
     /// Drops what's held for a terminal view that closed for good, as opposed
     /// to one hidden while its close can be undone, or moved.
     pub(crate) fn forget_terminal_view(
         &mut self,
-        _terminal_view_id: EntityId,
-        _ctx: &mut ModelContext<Self>,
+        terminal_view_id: EntityId,
+        ctx: &mut ModelContext<Self>,
     ) {
+        let was_marked = self.manually_unread.remove(&terminal_view_id);
+        let was_staged = self.staged_unread.remove(&terminal_view_id);
+        if was_marked || was_staged {
+            ctx.emit(AgentManagementEvent::NotificationUpdated);
+        }
     }
 
     /// Stages a mark restored with its pane: shown as unread, but no focus
     /// report clears it until `commit_restored_unread` runs.
     pub(crate) fn stage_restored_unread(
         &mut self,
-        _terminal_view_id: EntityId,
-        _ctx: &mut ModelContext<Self>,
+        terminal_view_id: EntityId,
+        ctx: &mut ModelContext<Self>,
     ) {
+        if self.staged_unread.insert(terminal_view_id) {
+            ctx.emit(AgentManagementEvent::NotificationUpdated);
+        }
     }
 
     /// Commits the staged marks among `terminal_view_ids` once restore has
     /// activated `window_id`'s tab, taking `focused_terminal_view_id` as that
-    /// window's focus baseline.
+    /// window's focus baseline. A committed mark shows just as it did staged,
+    /// and from here on it clears like any other.
     pub(crate) fn commit_restored_unread(
         &mut self,
-        _window_id: WindowId,
-        _terminal_view_ids: &[EntityId],
-        _focused_terminal_view_id: Option<EntityId>,
-        _ctx: &mut ModelContext<Self>,
+        window_id: WindowId,
+        terminal_view_ids: &[EntityId],
+        focused_terminal_view_id: Option<EntityId>,
     ) {
+        for terminal_view_id in terminal_view_ids {
+            if self.staged_unread.remove(terminal_view_id) {
+                self.manually_unread.insert(*terminal_view_id);
+            }
+        }
+        self.last_focus_by_window
+            .insert(window_id, focused_terminal_view_id);
+    }
+
+    /// A reply in `terminal_view_id` (a prompt submitted to Claude Code, or an
+    /// Oz conversation resuming) clears its manual mark, but only while the
+    /// user is looking at it: its pane is the focused pane of the active tab
+    /// in the active window. A prompt that starts on its own in a background
+    /// tab, like a /loop or a queued or scheduled prompt, leaves the mark.
+    fn clear_mark_on_reply(&mut self, terminal_view_id: EntityId, ctx: &mut ModelContext<Self>) {
+        if !FeatureFlag::TabMarkUnread.is_enabled() {
+            return;
+        }
+        let focused_in_active_window = focused_terminal_in_active_window(ctx);
+        self.clear_mark_on_reply_while_focused(terminal_view_id, focused_in_active_window, ctx);
+    }
+
+    /// `clear_mark_on_reply`, given the terminal focused in the active window.
+    fn clear_mark_on_reply_while_focused(
+        &mut self,
+        terminal_view_id: EntityId,
+        focused_in_active_window: Option<EntityId>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if focused_in_active_window == Some(terminal_view_id)
+            && self.manually_unread.remove(&terminal_view_id)
+        {
+            ctx.emit(AgentManagementEvent::NotificationUpdated);
+        }
     }
 
     fn handle_active_agent_views_changed(
@@ -205,6 +313,16 @@ impl AgentNotificationsModel {
         event: &CLIAgentSessionsModelEvent,
         ctx: &mut ModelContext<Self>,
     ) {
+        // A reply clears a manual mark whether or not the mailbox is on.
+        if let CLIAgentSessionsModelEvent::StatusChanged {
+            terminal_view_id,
+            status: CLIAgentSessionStatus::InProgress,
+            ..
+        } = event
+        {
+            self.clear_mark_on_reply(*terminal_view_id, ctx);
+        }
+
         if !FeatureFlag::HOANotifications.is_enabled() {
             return;
         }
@@ -345,6 +463,20 @@ impl AgentNotificationsModel {
 
         let status = updated_conversation.status().clone();
         let latest_query = updated_conversation.latest_user_query();
+
+        // A reply clears a manual mark whether or not the mailbox is on.
+        match status {
+            ConversationStatus::InProgress => {
+                self.clear_mark_on_reply(*terminal_surface_id, ctx);
+            }
+            ConversationStatus::Success
+            | ConversationStatus::Blocked { .. }
+            | ConversationStatus::Error
+            | ConversationStatus::Cancelled
+            | ConversationStatus::TransientError
+            | ConversationStatus::WaitingForEvents => {}
+        }
+
         if FeatureFlag::HOANotifications.is_enabled() {
             self.handle_history_event_for_mailbox(
                 &status,
@@ -663,6 +795,36 @@ fn active_focused_terminal_id(app: &AppContext) -> Option<EntityId> {
 
     let workspace = workspace.as_ref(app);
     workspace.active_terminal_id(app)
+}
+
+/// The terminal in the focused pane of the active window's active tab: the one
+/// pane a reply can come from while the user is looking at it. `None` when no
+/// window is active, as when the app is in the background, or when that pane
+/// isn't a terminal.
+fn focused_terminal_in_active_window(app: &AppContext) -> Option<EntityId> {
+    #[cfg(test)]
+    {
+        if let Some(focused) = ACTIVE_WINDOW_FOCUS_FOR_TESTS.with(std::cell::Cell::get) {
+            return focused;
+        }
+    }
+    let window_id = app.windows().active_window()?;
+    if !app.has_singleton_model::<WorkspaceRegistry>() {
+        return None;
+    }
+    let workspace = WorkspaceRegistry::as_ref(app).get(window_id, app)?;
+    workspace
+        .as_ref(app)
+        .active_tab_focused_terminal_view_id(app)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// App tests can't make a window active, so a test that needs one names
+    /// the terminal that would be focused in it (`Some(None)` for a
+    /// non-terminal pane).
+    static ACTIVE_WINDOW_FOCUS_FOR_TESTS: std::cell::Cell<Option<Option<EntityId>>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]

@@ -5583,11 +5583,11 @@ impl Workspace {
     }
 
     /// The terminal view in the active tab's focused pane, or `None` when that
-    /// pane isn't a terminal.
+    /// pane isn't a terminal. A temporary replacement (an expanded code diff)
+    /// counts as the pane it stands in for, the way its row shows it.
     pub(crate) fn active_tab_focused_terminal_view_id(&self, ctx: &AppContext) -> Option<EntityId> {
         let pane_group = self.active_tab_pane_group().as_ref(ctx);
-        pane_group
-            .terminal_view_from_pane_id(pane_group.focused_pane_id(ctx), ctx)
+        tab_unread::row_terminal_view(pane_group, pane_group.focused_pane_id(ctx), ctx)
             .map(|terminal_view| terminal_view.id())
     }
 
@@ -7987,11 +7987,13 @@ impl Workspace {
                 locator,
                 rename_label: "Rename pane",
                 reset_label: "Reset pane name",
+                is_pane_row: true,
             },
             VerticalTabsPaneContextMenuTarget::ActivePane(locator) => PaneNameMenuTarget {
                 locator,
                 rename_label: "Rename active pane",
                 reset_label: "Reset active pane name",
+                is_pane_row: false,
             },
         };
         let can_move_left = self.can_move_tab(tab_index, TabMovement::Left);
@@ -26540,6 +26542,9 @@ impl View for Workspace {
 
     fn self_or_child_interacted_with(&self, ctx: &mut ViewContext<Self>) {
         self.sync_window_button_visibility(ctx);
+        // A restored unread mark staged after restore committed this window's
+        // marks is committed on the window's first input.
+        self.commit_straggling_unread_marks(ctx);
     }
 
     fn keymap_context(&self, app: &AppContext) -> warpui::keymap::Context {
