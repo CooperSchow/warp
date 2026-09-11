@@ -1,7 +1,10 @@
+use std::collections::BTreeSet;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use repo_metadata::entry::{DirectoryEntry, Entry, FileMetadata};
-use repo_metadata::file_tree_store::FileTreeState;
+use repo_metadata::file_tree_store::{FileTreeEntryState, FileTreeState};
 use repo_metadata::local_model::IndexedRepoState;
 use repo_metadata::repositories::DetectedRepositories;
 use repo_metadata::watcher::DirectoryWatcher;
@@ -9,11 +12,14 @@ use repo_metadata::RepoMetadataModel;
 use settings::Setting;
 use virtual_fs::{Stub, VirtualFS};
 use warp_core::ui::appearance::Appearance;
+use warpui::keymap::Keystroke;
 use warpui::platform::WindowStyle;
-use warpui::{App, ModelHandle, SingletonEntity};
+use warpui::r#async::Timer;
+use warpui::{App, Entity, EntityId, ModelHandle, SingletonEntity, ViewHandle, WindowId};
 
-use super::FileTreeView;
+use super::{FileTreeAction, FileTreeEvent, FileTreeIdentifier, FileTreeView};
 use crate::auth::AuthStateProvider;
+use crate::code::file_tree::delete_confirmation_dialog::{DeleteFileConfirmationAction, ItemKind};
 use crate::server::server_api::team::MockTeamClient;
 use crate::server::server_api::workspace::MockWorkspaceClient;
 use crate::settings::CodeSettings;
@@ -1125,6 +1131,710 @@ fn absorbed_descendant_is_unregistered_from_lazy_loaded_paths() {
             });
             repository_metadata_model.read(&app, |model, ctx| {
                 assert!(!model.is_lazy_loaded_path(&std_path(&a), ctx));
+            });
+        });
+    });
+}
+
+// ── Deleting from the context menu ──────────────────────────────────
+
+/// Every path under `dir`, found without following symbolic links.
+fn paths_under(dir: &Path) -> BTreeSet<PathBuf> {
+    let mut paths = BTreeSet::new();
+    let mut folders = vec![dir.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(&folder).expect("the test folder is readable") {
+            let path = entry.expect("the test folder entry is readable").path();
+            if std::fs::symlink_metadata(&path).expect("lstat").is_dir() {
+                folders.push(path.clone());
+            }
+            paths.insert(path);
+        }
+    }
+    paths
+}
+
+/// Panics unless `path` lies strictly inside `test_dir`, and `test_dir` inside the system temp
+/// folder. Every delete these tests cause, directly or through the file tree, is checked here
+/// first.
+fn assert_inside_test_dir(path: &Path, test_dir: &Path) {
+    let temp_root = dunce::canonicalize(std::env::temp_dir()).expect("the temp folder resolves");
+    assert!(
+        test_dir.starts_with(&temp_root),
+        "{} is not inside the system temp folder {}",
+        test_dir.display(),
+        temp_root.display()
+    );
+    assert!(
+        path.starts_with(test_dir)
+            && path != test_dir
+            && !path
+                .components()
+                .any(|component| component == Component::ParentDir),
+        "{} is not inside the test folder {}",
+        path.display(),
+        test_dir.display()
+    );
+}
+
+/// Records what the file tree reports while deleting: the toasts it raises and the paths it
+/// says it deleted.
+#[derive(Default)]
+struct DeleteObserver {
+    toasts: usize,
+    deleted: Vec<PathBuf>,
+}
+
+impl Entity for DeleteObserver {
+    type Event = ();
+}
+
+fn observe_deletes(app: &mut App, view: &ViewHandle<FileTreeView>) -> ModelHandle<DeleteObserver> {
+    app.add_model(|ctx| {
+        ctx.subscribe_to_model(
+            &ToastStack::handle(ctx),
+            |observer: &mut DeleteObserver, _, _, _| {
+                observer.toasts += 1;
+            },
+        );
+        ctx.subscribe_to_view(view, |observer: &mut DeleteObserver, _, event, _| {
+            if let FileTreeEvent::FileDeleted { path } = event {
+                observer.deleted.push(path.clone());
+            }
+        });
+        DeleteObserver::default()
+    })
+}
+
+/// Opens a file tree on `tree` in a new window, with the file tree's key bindings registered.
+fn open_file_tree(app: &mut App, tree: &Path) -> (WindowId, ViewHandle<FileTreeView>) {
+    app.update(super::init);
+    let (window_id, view) = app.add_window(WindowStyle::NotStealFocus, FileTreeView::new);
+    view.update(app, |view, ctx| {
+        view.set_is_active(true, ctx);
+        view.set_root_directories(vec![tree.to_path_buf()], ctx);
+    });
+    (window_id, view)
+}
+
+/// The row in `root`'s list that shows `path`.
+fn row_of(view: &FileTreeView, root: &Path, path: &Path) -> FileTreeIdentifier {
+    let index = view
+        .root_directories
+        .get(&std_path(root))
+        .expect("root directory is tracked")
+        .items
+        .iter()
+        .position(|item| item.path() == &std_path(path))
+        .expect("the item is in the flattened list");
+    FileTreeIdentifier {
+        root: std_path(root),
+        index,
+    }
+}
+
+/// The action the context menu's "Delete…" item carries for `path`, as the list is now.
+fn delete_action(view: &FileTreeView, root: &Path, path: &Path) -> FileTreeAction {
+    FileTreeAction::Delete {
+        id: row_of(view, root, path),
+        path: std_path(path),
+    }
+}
+
+/// Chooses "Delete…" for `path`, the way the context menu does.
+fn choose_delete(
+    app: &mut App,
+    window_id: WindowId,
+    view: &ViewHandle<FileTreeView>,
+    root: &Path,
+    path: &Path,
+) {
+    let action = view.read(app, |view, _| delete_action(view, root, path));
+    app.dispatch_typed_action(window_id, &[view.id()], &action);
+}
+
+/// The focus path to the delete dialog: the file tree, then the dialog inside it.
+fn dialog_chain(app: &App, view: &ViewHandle<FileTreeView>) -> [EntityId; 2] {
+    [view.id(), view.read(app, |view, _| view.delete_dialog.id())]
+}
+
+/// Clicks the dialog's Cancel button, which dispatches `Cancel` to the dialog.
+fn click_cancel(app: &mut App, window_id: WindowId, view: &ViewHandle<FileTreeView>) {
+    let chain = dialog_chain(app, view);
+    app.dispatch_typed_action(window_id, &chain, &DeleteFileConfirmationAction::Cancel);
+}
+
+/// Clicks the dialog's Delete button, after checking that the dialog targets a path inside the
+/// test folder.
+fn click_delete(
+    app: &mut App,
+    window_id: WindowId,
+    view: &ViewHandle<FileTreeView>,
+    test_dir: &Path,
+) {
+    let target = view
+        .read(app, |view, _| view.pending_delete.clone())
+        .expect("the delete dialog is open");
+    assert_inside_test_dir(&target.local_path, test_dir);
+    let chain = dialog_chain(app, view);
+    app.dispatch_typed_action(window_id, &chain, &DeleteFileConfirmationAction::Confirm);
+}
+
+/// Presses `key` while the delete dialog has focus. Returns whether anything handled it.
+fn press(app: &mut App, window_id: WindowId, view: &ViewHandle<FileTreeView>, key: &str) -> bool {
+    let chain = dialog_chain(app, view);
+    app.dispatch_keystroke(
+        window_id,
+        &chain,
+        &Keystroke::parse(key).expect("valid keystroke"),
+        false,
+    )
+    .expect("the keystroke dispatches")
+}
+
+/// Waits until every background delete has called back.
+async fn wait_for_deletes(app: &mut App, view: &ViewHandle<FileTreeView>) {
+    for _ in 0..500 {
+        if view.read(app, |view, _| view.deletes_in_flight.is_empty()) {
+            return;
+        }
+        Timer::after(Duration::from_millis(10)).await;
+    }
+    panic!("a background delete never called back");
+}
+
+/// Checks that the dialog is closed with nothing pending or running, and that the file tree has
+/// focus back.
+fn assert_dialog_closed(app: &App, window_id: WindowId, view: &ViewHandle<FileTreeView>) {
+    view.read(app, |view, _| {
+        assert!(view.pending_delete.is_none(), "the dialog is closed");
+        assert!(view.deletes_in_flight.is_empty(), "no delete was started");
+    });
+    assert_eq!(
+        app.focused_view_id(window_id),
+        Some(view.id()),
+        "the file tree has focus back"
+    );
+}
+
+/// Adds `file` to the in-memory tree and rebuilds the list, the way a file-watcher update does.
+/// These tests run without a watcher, so they stand in for it.
+fn add_file_to_tree(app: &mut App, view: &ViewHandle<FileTreeView>, root: &Path, file: &Path) {
+    view.update(app, |view, _| {
+        let root_dir = view
+            .root_directories
+            .get_mut(&std_path(root))
+            .expect("root directory is tracked");
+        root_dir.entry.insert_child_state(
+            &std_path(file.parent().expect("the file has a parent")),
+            FileTreeEntryState::File(FileMetadata::from_standardized(std_path(file), false).into()),
+        );
+        view.rebuild_flattened_items();
+    });
+}
+
+#[test]
+fn delete_menu_item_carries_the_items_path() {
+    VirtualFS::test("file_tree_delete_menu_item", |dirs, mut vfs| {
+        vfs.mkdir("tree")
+            .with_files(vec![Stub::FileWithContent("tree/victim.txt", "victim\n")]);
+        let tree = dirs.tests().join("tree");
+        let victim = tree.join("victim.txt");
+
+        App::test((), |mut app| async move {
+            let _ = initialize_app(&mut app);
+            let (_, view) = open_file_tree(&mut app, &tree);
+
+            view.read(&app, |view, _| {
+                let delete_actions = |path: &Path| -> Vec<FileTreeAction> {
+                    let row = row_of(view, &tree, path);
+                    let item = &view.root_directories[&row.root].items[row.index];
+                    view.context_menu_items(item, &row)
+                        .iter()
+                        .filter_map(|menu_item| menu_item.fields())
+                        .filter(|fields| fields.label().starts_with("Delete"))
+                        .map(|fields| {
+                            assert_eq!(fields.label(), "Delete…");
+                            fields
+                                .on_select_action()
+                                .cloned()
+                                .expect("Delete… has an action")
+                        })
+                        .collect()
+                };
+
+                let actions = delete_actions(&victim);
+                assert!(
+                    matches!(
+                        actions.as_slice(),
+                        [FileTreeAction::Delete { path, .. }] if *path == std_path(&victim)
+                    ),
+                    "Delete… carries the item's path"
+                );
+                assert!(
+                    delete_actions(&tree).is_empty(),
+                    "the root item has no Delete"
+                );
+            });
+        });
+    });
+}
+
+#[test]
+fn delete_opens_the_dialog_and_touches_nothing_on_disk() {
+    VirtualFS::test("file_tree_delete_opens_dialog", |dirs, mut vfs| {
+        vfs.mkdir("tree").with_files(vec![
+            Stub::FileWithContent("tree/keep.txt", "keep\n"),
+            Stub::FileWithContent("tree/victim.txt", "victim\n"),
+        ]);
+        let tree = dirs.tests().join("tree");
+        let victim = tree.join("victim.txt");
+
+        App::test((), |mut app| async move {
+            let _ = initialize_app(&mut app);
+            let (window_id, view) = open_file_tree(&mut app, &tree);
+            let before = paths_under(&tree);
+
+            choose_delete(&mut app, window_id, &view, &tree, &victim);
+
+            let dialog_id = view.read(&app, |view, _| {
+                let target = view
+                    .pending_delete
+                    .as_ref()
+                    .expect("the delete dialog is open");
+                assert_eq!(target.std_path, std_path(&victim));
+                assert_eq!(target.local_path, victim);
+                assert_eq!(target.kind, ItemKind::File);
+                assert_eq!(target.display_name, "victim.txt");
+                assert_eq!(target.child_count, None);
+                assert!(
+                    view.deletes_in_flight.is_empty(),
+                    "nothing runs before a confirm"
+                );
+                view.delete_dialog.id()
+            });
+            assert_eq!(
+                app.focused_view_id(window_id),
+                Some(dialog_id),
+                "the dialog has focus"
+            );
+
+            // Leave time for anything that might have been started in the background.
+            Timer::after(Duration::from_millis(50)).await;
+            assert_eq!(paths_under(&tree), before);
+        });
+    });
+}
+
+#[test]
+fn cancel_and_escape_close_the_dialog_and_keep_the_item() {
+    VirtualFS::test("file_tree_delete_cancel", |dirs, mut vfs| {
+        vfs.mkdir("tree")
+            .with_files(vec![Stub::FileWithContent("tree/victim.txt", "victim\n")]);
+        let tree = dirs.tests().join("tree");
+        let victim = tree.join("victim.txt");
+
+        App::test((), |mut app| async move {
+            let _ = initialize_app(&mut app);
+            let (window_id, view) = open_file_tree(&mut app, &tree);
+            let before = paths_under(&tree);
+
+            choose_delete(&mut app, window_id, &view, &tree, &victim);
+            click_cancel(&mut app, window_id, &view);
+            assert_dialog_closed(&app, window_id, &view);
+
+            choose_delete(&mut app, window_id, &view, &tree, &victim);
+            assert!(
+                press(&mut app, window_id, &view, "escape"),
+                "the dialog handles Escape"
+            );
+            assert_dialog_closed(&app, window_id, &view);
+
+            view.read(&app, |view, _| {
+                assert!(flattened_paths(view, &tree).contains(&std_path(&victim)));
+            });
+            Timer::after(Duration::from_millis(50)).await;
+            assert_eq!(paths_under(&tree), before);
+        });
+    });
+}
+
+#[test]
+fn return_cancels_and_no_keystroke_deletes() {
+    VirtualFS::test("file_tree_delete_keys", |dirs, mut vfs| {
+        vfs.mkdir("tree/victim-folder")
+            .with_files(vec![Stub::FileWithContent(
+                "tree/victim-folder/leaf.txt",
+                "leaf\n",
+            )]);
+        let tree = dirs.tests().join("tree");
+        let folder = tree.join("victim-folder");
+
+        App::test((), |mut app| async move {
+            let _ = initialize_app(&mut app);
+            let (window_id, view) = open_file_tree(&mut app, &tree);
+            let before = paths_under(&tree);
+            // Select the folder, as right-clicking it does, so a Return that leaked through to
+            // the file tree would visibly expand it.
+            view.update(&mut app, |view, ctx| {
+                let row = row_of(view, &tree, &folder);
+                view.select_id(&row, ctx);
+            });
+            let is_expanded = |app: &App| {
+                view.read(app, |view, _| {
+                    view.is_folder_expanded(&std_path(&tree), &std_path(&folder))
+                })
+            };
+            let expanded_before = is_expanded(&app);
+
+            choose_delete(&mut app, window_id, &view, &tree, &folder);
+            assert!(
+                press(&mut app, window_id, &view, "enter"),
+                "the dialog handles Return"
+            );
+            assert_dialog_closed(&app, window_id, &view);
+            assert_eq!(
+                is_expanded(&app),
+                expanded_before,
+                "Return never reached the file tree"
+            );
+
+            // Deleting is click-only: every keystroke either cancels (Return, the keypad's Enter
+            // and Escape) or does nothing, and none of them starts a delete.
+            for key in [
+                "enter",
+                "numpadenter",
+                "escape",
+                "shift-enter",
+                "cmd-enter",
+                "ctrl-enter",
+                "alt-enter",
+                "space",
+                "tab",
+                "backspace",
+                "cmd-backspace",
+                "delete",
+                "cmd-delete",
+                "y",
+                "d",
+                "cmd-d",
+            ] {
+                choose_delete(&mut app, window_id, &view, &tree, &folder);
+                press(&mut app, window_id, &view, key);
+                view.read(&app, |view, _| {
+                    assert!(view.deletes_in_flight.is_empty(), "{key} started a delete");
+                    let cancels = matches!(key, "enter" | "numpadenter" | "escape");
+                    assert_eq!(view.pending_delete.is_none(), cancels, "{key}");
+                });
+            }
+
+            Timer::after(Duration::from_millis(50)).await;
+            assert_eq!(paths_under(&tree), before);
+        });
+    });
+}
+
+#[test]
+fn confirm_deletes_the_captured_path_after_the_list_shifts() {
+    VirtualFS::test("file_tree_delete_index_shift", |dirs, mut vfs| {
+        vfs.mkdir("tree").with_files(vec![
+            Stub::FileWithContent("tree/b.txt", "b\n"),
+            Stub::FileWithContent("tree/c.txt", "c\n"),
+        ]);
+        let test_dir = dirs.tests().clone();
+        let tree = test_dir.join("tree");
+        let a0 = tree.join("a0.txt");
+        let b = tree.join("b.txt");
+        let c = tree.join("c.txt");
+
+        App::test((), |mut app| async move {
+            let _ = initialize_app(&mut app);
+            let (window_id, view) = open_file_tree(&mut app, &tree);
+            let observer = observe_deletes(&mut app, &view);
+            let captured_row = view.read(&app, |view, _| row_of(view, &tree, &c));
+
+            choose_delete(&mut app, window_id, &view, &tree, &c);
+
+            // A new file sorts in above c.txt, the way a file-watcher rebuild would add it, so
+            // the row the menu captured now holds b.txt.
+            std::fs::write(&a0, "a0\n").expect("create a0.txt");
+            add_file_to_tree(&mut app, &view, &tree, &a0);
+            view.read(&app, |view, _| {
+                let items = &view.root_directories[&std_path(&tree)].items;
+                assert_eq!(items[captured_row.index].path(), &std_path(&b));
+            });
+            let before = paths_under(&tree);
+
+            click_delete(&mut app, window_id, &view, &test_dir);
+            // While that delete runs, another request for the same file is ignored.
+            choose_delete(&mut app, window_id, &view, &tree, &c);
+            view.read(&app, |view, _| assert!(view.pending_delete.is_none()));
+            wait_for_deletes(&mut app, &view).await;
+
+            let mut expected = before.clone();
+            expected.remove(&c);
+            assert_eq!(paths_under(&tree), expected, "only c.txt is gone");
+            view.read(&app, |view, _| {
+                let paths = flattened_paths(view, &tree);
+                assert!(!paths.contains(&std_path(&c)));
+                assert!(paths.contains(&std_path(&b)));
+                assert!(paths.contains(&std_path(&a0)));
+            });
+            observer.read(&app, |observer, _| {
+                assert_eq!(observer.deleted, vec![c.clone()]);
+                assert_eq!(observer.toasts, 0);
+            });
+            assert_eq!(app.focused_view_id(window_id), Some(view.id()));
+        });
+    });
+}
+
+#[test]
+fn confirm_aborts_when_the_file_was_replaced() {
+    VirtualFS::test("file_tree_delete_replaced", |dirs, mut vfs| {
+        vfs.mkdir("tree")
+            .with_files(vec![Stub::FileWithContent("tree/victim.txt", "old\n")]);
+        let test_dir = dirs.tests().clone();
+        let tree = test_dir.join("tree");
+        let victim = tree.join("victim.txt");
+        let replacement = tree.join("victim.txt.new");
+
+        App::test((), |mut app| async move {
+            let _ = initialize_app(&mut app);
+            let (window_id, view) = open_file_tree(&mut app, &tree);
+            let observer = observe_deletes(&mut app, &view);
+
+            choose_delete(&mut app, window_id, &view, &tree, &victim);
+
+            // Replace the file the way an editor's atomic save does. Both files exist at once,
+            // so the new one can't reuse the old inode, and its size differs too.
+            std::fs::write(&replacement, "replacement contents\n").expect("write the replacement");
+            assert_inside_test_dir(&victim, &test_dir);
+            std::fs::rename(&replacement, &victim).expect("replace victim.txt");
+            let before = paths_under(&tree);
+
+            click_delete(&mut app, window_id, &view, &test_dir);
+            wait_for_deletes(&mut app, &view).await;
+
+            assert_eq!(paths_under(&tree), before, "nothing was deleted");
+            assert_eq!(
+                std::fs::read_to_string(&victim).expect("victim.txt is still there"),
+                "replacement contents\n"
+            );
+            view.read(&app, |view, _| {
+                assert!(flattened_paths(view, &tree).contains(&std_path(&victim)));
+            });
+            observer.read(&app, |observer, _| {
+                assert_eq!(observer.toasts, 1, "an error toast explains why");
+                assert!(observer.deleted.is_empty());
+            });
+        });
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn confirm_on_a_symlink_removes_only_the_link() {
+    VirtualFS::test("file_tree_delete_symlink", |dirs, mut vfs| {
+        vfs.mkdir("tree")
+            .with_files(vec![Stub::FileWithContent("tree/keep.txt", "keep\n")]);
+        vfs.ln("tree/keep.txt", "tree/link-to-keep");
+        let test_dir = dirs.tests().clone();
+        let tree = test_dir.join("tree");
+        let target = tree.join("keep.txt");
+        let link = tree.join("link-to-keep");
+
+        App::test((), |mut app| async move {
+            let _ = initialize_app(&mut app);
+            let (window_id, view) = open_file_tree(&mut app, &tree);
+            let observer = observe_deletes(&mut app, &view);
+            let before = paths_under(&tree);
+
+            choose_delete(&mut app, window_id, &view, &tree, &link);
+            view.read(&app, |view, _| {
+                let pending = view.pending_delete.as_ref().expect("the dialog is open");
+                assert_eq!(pending.kind, ItemKind::Symlink);
+            });
+            click_delete(&mut app, window_id, &view, &test_dir);
+            wait_for_deletes(&mut app, &view).await;
+
+            let mut expected = before.clone();
+            expected.remove(&link);
+            assert_eq!(paths_under(&tree), expected, "only the link is gone");
+            assert_eq!(
+                std::fs::read_to_string(&target).expect("the link's target survives"),
+                "keep\n"
+            );
+            observer.read(&app, |observer, _| {
+                assert_eq!(observer.deleted, vec![link.clone()]);
+            });
+        });
+    });
+}
+
+#[test]
+fn confirm_on_a_folder_removes_it_and_everything_in_it() {
+    VirtualFS::test("file_tree_delete_folder", |dirs, mut vfs| {
+        vfs.mkdir("tree/victim-folder/nested")
+            .mkdir("tree/keep-folder")
+            .with_files(vec![
+                Stub::FileWithContent("tree/victim-folder/a.txt", "a\n"),
+                Stub::FileWithContent("tree/victim-folder/nested/leaf.txt", "leaf\n"),
+                Stub::FileWithContent("tree/keep-folder/k.txt", "k\n"),
+                Stub::FileWithContent("tree/sibling.txt", "sibling\n"),
+            ]);
+        let test_dir = dirs.tests().clone();
+        let tree = test_dir.join("tree");
+        let folder = tree.join("victim-folder");
+        let keep_folder = tree.join("keep-folder");
+
+        App::test((), |mut app| async move {
+            let _ = initialize_app(&mut app);
+            let (window_id, view) = open_file_tree(&mut app, &tree);
+            let observer = observe_deletes(&mut app, &view);
+
+            // A folder that was never expanded isn't loaded, so its count is left out.
+            choose_delete(&mut app, window_id, &view, &tree, &keep_folder);
+            view.read(&app, |view, _| {
+                let pending = view.pending_delete.as_ref().expect("the dialog is open");
+                assert_eq!(pending.kind, ItemKind::Directory);
+                assert_eq!(pending.child_count, None);
+            });
+            click_cancel(&mut app, window_id, &view);
+
+            // Expanding the folder loads it, and the count comes from the in-memory tree.
+            view.update(&mut app, |view, ctx| {
+                view.toggle_folder_expansion(&std_path(&tree), &std_path(&folder), ctx);
+            });
+            choose_delete(&mut app, window_id, &view, &tree, &folder);
+            view.read(&app, |view, _| {
+                let pending = view.pending_delete.as_ref().expect("the dialog is open");
+                assert_eq!(pending.kind, ItemKind::Directory);
+                assert_eq!(pending.child_count, Some(2));
+            });
+            let before = paths_under(&tree);
+
+            click_delete(&mut app, window_id, &view, &test_dir);
+            wait_for_deletes(&mut app, &view).await;
+
+            let expected: BTreeSet<PathBuf> = before
+                .iter()
+                .filter(|path| !path.starts_with(&folder))
+                .cloned()
+                .collect();
+            assert_eq!(
+                before.len() - expected.len(),
+                4,
+                "the folder and its 3 entries"
+            );
+            assert_eq!(paths_under(&tree), expected, "siblings are intact");
+            observer.read(&app, |observer, _| {
+                assert_eq!(observer.deleted, vec![folder.clone()]);
+                assert_eq!(observer.toasts, 0);
+            });
+        });
+    });
+}
+
+#[test]
+fn a_stale_menu_action_is_refused() {
+    VirtualFS::test("file_tree_delete_stale_menu", |dirs, mut vfs| {
+        vfs.mkdir("tree").with_files(vec![
+            Stub::FileWithContent("tree/b.txt", "b\n"),
+            Stub::FileWithContent("tree/c.txt", "c\n"),
+        ]);
+        let tree = dirs.tests().join("tree");
+        let a0 = tree.join("a0.txt");
+        let c = tree.join("c.txt");
+
+        App::test((), |mut app| async move {
+            let _ = initialize_app(&mut app);
+            let (window_id, view) = open_file_tree(&mut app, &tree);
+            let observer = observe_deletes(&mut app, &view);
+
+            // The menu is built for c.txt, then the list shifts before Delete is chosen.
+            let stale = view.read(&app, |view, _| delete_action(view, &tree, &c));
+            std::fs::write(&a0, "a0\n").expect("create a0.txt");
+            add_file_to_tree(&mut app, &view, &tree, &a0);
+            let before = paths_under(&tree);
+
+            app.dispatch_typed_action(window_id, &[view.id()], &stale);
+
+            view.read(&app, |view, _| {
+                assert!(view.pending_delete.is_none(), "no dialog opens");
+                assert!(view.deletes_in_flight.is_empty(), "no delete was started");
+            });
+            observer.read(&app, |observer, _| {
+                assert_eq!(observer.toasts, 1, "a toast explains why");
+            });
+            Timer::after(Duration::from_millis(50)).await;
+            assert_eq!(paths_under(&tree), before);
+        });
+    });
+}
+
+/// Makes a folder read-only for as long as it lives, then restores it so the test folder can be
+/// cleaned up even when an assertion fails.
+#[cfg(unix)]
+struct ReadOnlyFolder(PathBuf);
+
+#[cfg(unix)]
+impl ReadOnlyFolder {
+    fn new(path: PathBuf, test_dir: &Path) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        assert_inside_test_dir(&path, test_dir);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o555))
+            .expect("make the folder read-only");
+        Self(path)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ReadOnlyFolder {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_delete_keeps_the_item_and_shows_an_error() {
+    VirtualFS::test("file_tree_delete_fails", |dirs, mut vfs| {
+        vfs.mkdir("tree/locked")
+            .with_files(vec![Stub::FileWithContent(
+                "tree/locked/file.txt",
+                "stay\n",
+            )]);
+        let test_dir = dirs.tests().clone();
+        let tree = test_dir.join("tree");
+        let locked = tree.join("locked");
+        let file = locked.join("file.txt");
+
+        App::test((), |mut app| async move {
+            let _ = initialize_app(&mut app);
+            let (window_id, view) = open_file_tree(&mut app, &tree);
+            let observer = observe_deletes(&mut app, &view);
+            view.update(&mut app, |view, ctx| {
+                view.toggle_folder_expansion(&std_path(&tree), &std_path(&locked), ctx);
+            });
+            // Removing a file needs write access to its folder.
+            let _read_only = ReadOnlyFolder::new(locked.clone(), &test_dir);
+            let before = paths_under(&tree);
+
+            choose_delete(&mut app, window_id, &view, &tree, &file);
+            click_delete(&mut app, window_id, &view, &test_dir);
+            wait_for_deletes(&mut app, &view).await;
+
+            assert_eq!(paths_under(&tree), before, "nothing was deleted");
+            view.read(&app, |view, _| {
+                assert!(flattened_paths(view, &tree).contains(&std_path(&file)));
+            });
+            observer.read(&app, |observer, _| {
+                assert_eq!(observer.toasts, 1, "an error toast explains why");
+                assert!(observer.deleted.is_empty());
             });
         });
     });
