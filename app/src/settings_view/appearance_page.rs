@@ -12,10 +12,9 @@ use warp_util::path::user_friendly_path;
 use warpui::elements::{
     Align, Border, ChildAnchor, ChildView, Clipped, ConstrainedBox, Container, CornerRadius,
     CrossAxisAlignment, Dismiss, Element, Empty, Expanded, Fill, Flex, FormattedTextElement,
-    Hoverable,
-    MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning, ParentElement,
-    PositionedElementAnchor, PositionedElementOffsetBounds, Radius, SavePosition, Shrinkable, Stack,
-    Text, Wrap, DEFAULT_UI_LINE_HEIGHT_RATIO,
+    Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning, ParentElement,
+    PositionedElementAnchor, PositionedElementOffsetBounds, Radius, SavePosition, Shrinkable,
+    Stack, Text, Wrap, DEFAULT_UI_LINE_HEIGHT_RATIO,
 };
 use warpui::fonts::{FamilyId, FontInfo, Weight};
 use warpui::keymap::{ContextPredicate, FixedBinding};
@@ -88,10 +87,7 @@ use crate::ui_components::icons::Icon;
 use crate::user_config::WarpConfig;
 use crate::util::bindings;
 use crate::view_components::action_button::{ActionButton, ButtonSize, NakedTheme, SecondaryTheme};
-use crate::view_components::{
-    Dropdown, DropdownItem, FilterableDropdown,
-};
-use warp_core::ui::color::hex_color::{coloru_from_hex_string, coloru_to_hex_string};
+use crate::view_components::{Dropdown, DropdownItem, FilterableDropdown};
 use crate::window_settings::{
     BackgroundBlurRadius, BackgroundBlurTexture, BackgroundOpacity, LeftPanelVisibilityAcrossTabs,
     OpenWindowsAtCustomSize, WindowSettings, WindowSettingsChangedEvent, ZoomLevel,
@@ -106,6 +102,7 @@ use crate::workspace::tab_settings::{
 };
 use crate::workspace::WorkspaceAction;
 use crate::{send_telemetry_from_ctx, themes};
+use warp_core::ui::color::hex_color::{coloru_from_hex_string, coloru_to_hex_string};
 
 const FONT_SIZE_INPUT_BOX_WIDTH: f32 = 80.;
 const NOTEBOOK_FONT_SIZE_INPUT_BOX_WIDTH: f32 = 50.;
@@ -2833,7 +2830,9 @@ impl AppearanceSettingsPageView {
     fn open_color_picker(&mut self, target: ColorPickerTarget, ctx: &mut ViewContext<Self>) {
         let initial = match target {
             ColorPickerTarget::AddPaletteColor => None,
-            ColorPickerTarget::EditPaletteColor(index) => custom_tab_colors(ctx).get(index).cloned(),
+            ColorPickerTarget::EditPaletteColor(index) => {
+                custom_tab_colors(ctx).get(index).cloned()
+            }
             ColorPickerTarget::RuleFormColor => Some(self.claude_rule_form_color.clone()),
         };
         let allow_remove = matches!(target, ColorPickerTarget::EditPaletteColor(_));
@@ -2943,7 +2942,8 @@ impl AppearanceSettingsPageView {
         let Some(rule) = rules.get(index) else {
             return;
         };
-        let (name, keywords, color) = (rule.name.clone(), rule.keywords.clone(), rule.color.clone());
+        let (name, keywords, color) =
+            (rule.name.clone(), rule.keywords.clone(), rule.color.clone());
         self.claude_rule_name_editor.update(ctx, |editor, ctx| {
             editor.system_reset_buffer_text(&name, ctx);
         });
@@ -2957,7 +2957,10 @@ impl AppearanceSettingsPageView {
 
     fn delete_claude_rule(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
         TabSettings::handle(ctx).update(ctx, |settings, ctx| {
-            let new_value = settings.claude_auto_color_rules.value().without_index(index);
+            let new_value = settings
+                .claude_auto_color_rules
+                .value()
+                .without_index(index);
             let _ = settings.claude_auto_color_rules.set_value(new_value, ctx);
         });
         match self.claude_rule_editing {

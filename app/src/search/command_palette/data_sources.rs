@@ -57,8 +57,7 @@ impl DataSourceStore {
         let all_conversation_data_source: ModelHandle<conversations::DataSource> =
             ctx.add_model(|_| conversations::DataSource::new());
 
-        let claude_conversations_data_source =
-            ctx.add_model(claude_conversations::DataSource::new);
+        let claude_conversations_data_source = ctx.add_model(claude_conversations::DataSource::new);
 
         let repo_data_source = ctx.add_model(|_| RepoDataSource::new());
 

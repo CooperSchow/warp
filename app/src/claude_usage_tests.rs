@@ -10,7 +10,10 @@ fn parses_windows_and_resets() {
     let u = parse_usage(body).expect("valid payload");
     assert_eq!(u.five_hour_pct, 7.0);
     assert_eq!(u.weekly_pct, 9.0);
-    assert_eq!(u.five_hour_resets_at.as_deref(), Some("2026-07-16T04:50:00Z"));
+    assert_eq!(
+        u.five_hour_resets_at.as_deref(),
+        Some("2026-07-16T04:50:00Z")
+    );
     assert_eq!(u.weekly_resets_at.as_deref(), Some("2026-07-20T05:00:00Z"));
     assert_eq!(u.pill_label(), "5h 7% · wk 9%");
 }
@@ -189,7 +192,10 @@ mod poll_policy {
 
         for i in 1..=5 {
             let delay = model.record_poll(None, now + Duration::from_secs(i));
-            assert!(delay >= POLL_INTERVAL, "never faster than the steady cadence");
+            assert!(
+                delay >= POLL_INTERVAL,
+                "never faster than the steady cadence"
+            );
         }
         assert!(model.usage().is_none());
     }
@@ -256,7 +262,10 @@ mod cache {
         assert_eq!(read.five_hour_pct, 42.0);
         assert_eq!(read.weekly_pct, 13.5);
         assert_eq!(read.severity, UsageSeverity::Warning);
-        assert_eq!(read.five_hour_resets_at.as_deref(), Some("2026-07-26T23:20:00Z"));
+        assert_eq!(
+            read.five_hour_resets_at.as_deref(),
+            Some("2026-07-26T23:20:00Z")
+        );
         assert_eq!(
             read_taken_at, taken_at,
             "second-resolution timestamp must survive the round trip"

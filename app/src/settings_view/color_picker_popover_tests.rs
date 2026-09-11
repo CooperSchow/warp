@@ -121,28 +121,19 @@ fn hue_and_sv_actions_update_the_color() {
                 picker.open_with(Some("#ff0000"), false, ctx);
                 // Full saturation and value at 120° is pure green.
                 picker.handle_action(&ColorPickerPopoverAction::SetHue(120.), ctx);
-                picker.handle_action(
-                    &ColorPickerPopoverAction::SetSv { sat: 1., val: 1. },
-                    ctx,
-                );
+                picker.handle_action(&ColorPickerPopoverAction::SetSv { sat: 1., val: 1. }, ctx);
             });
             assert_eq!(picker.as_ref(ctx).current_hex(), "#00ff00");
 
             // Dragging to the top-left of the SV square is white.
             picker.update(ctx, |picker, ctx| {
-                picker.handle_action(
-                    &ColorPickerPopoverAction::SetSv { sat: 0., val: 1. },
-                    ctx,
-                );
+                picker.handle_action(&ColorPickerPopoverAction::SetSv { sat: 0., val: 1. }, ctx);
             });
             assert_eq!(picker.as_ref(ctx).current_hex(), "#ffffff");
 
             // The bottom of the square is black regardless of hue/saturation.
             picker.update(ctx, |picker, ctx| {
-                picker.handle_action(
-                    &ColorPickerPopoverAction::SetSv { sat: 1., val: 0. },
-                    ctx,
-                );
+                picker.handle_action(&ColorPickerPopoverAction::SetSv { sat: 1., val: 0. }, ctx);
             });
             assert_eq!(picker.as_ref(ctx).current_hex(), "#000000");
         });
@@ -158,13 +149,7 @@ fn out_of_range_drag_values_are_clamped() {
             let picker = ctx.add_typed_action_view(window_id, ColorPickerPopover::new);
             picker.update(ctx, |picker, ctx| {
                 picker.open_with(Some("#ff0000"), false, ctx);
-                picker.handle_action(
-                    &ColorPickerPopoverAction::SetSv {
-                        sat: 5.,
-                        val: -3.,
-                    },
-                    ctx,
-                );
+                picker.handle_action(&ColorPickerPopoverAction::SetSv { sat: 5., val: -3. }, ctx);
                 picker.handle_action(&ColorPickerPopoverAction::SetHue(999.), ctx);
             });
             // Clamped rather than wrapped or panicking.

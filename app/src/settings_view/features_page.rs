@@ -61,7 +61,6 @@ use crate::search::command_search::settings::{
 };
 use crate::server::telemetry::TelemetryEvent;
 use crate::settings::ai::AISettings;
-use crate::settings::{ClaudeConversationsEnabled, ClaudeSettings, ClaudeUsagePillEnabled};
 use crate::settings::native_preference::{NativePreferenceSettings, UserNativePreference};
 use crate::settings::{
     AISettingsChangedEvent, AliasExpansionEnabled, AliasExpansionSettings, AppEditorSettings,
@@ -78,6 +77,7 @@ use crate::settings::{
     UserNativeRedirectPreference, VimModeEnabled, VimStatusBar, VimUnnamedSystemClipboard,
     DEFAULT_QUAKE_MODE_SIZE_PERCENTAGES, QUAKE_WINDOW_AUTOHIDE_SUPPORTED,
 };
+use crate::settings::{ClaudeConversationsEnabled, ClaudeSettings, ClaudeUsagePillEnabled};
 use crate::terminal::alt_screen_reporting::{
     AltScreenReporting, FocusReportingEnabled, MouseReportingEnabled, ScrollReportingEnabled,
 };
@@ -7857,8 +7857,7 @@ impl SettingsWidget for ClaudeUsagePillWidget {
             switch,
             appearance,
             Some(
-                "Show your Claude 5-hour and weekly usage limits as a pill in the tab bar."
-                    .into(),
+                "Show your Claude 5-hour and weekly usage limits as a pill in the tab bar.".into(),
             ),
         )
     }

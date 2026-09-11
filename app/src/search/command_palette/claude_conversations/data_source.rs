@@ -101,10 +101,7 @@ impl DataSource {
                 match by_id.get(&cached.session.session_id) {
                     Some(existing) if existing.last_activity >= cached.session.last_activity => {}
                     _ => {
-                        by_id.insert(
-                            cached.session.session_id.clone(),
-                            cached.session.clone(),
-                        );
+                        by_id.insert(cached.session.session_id.clone(), cached.session.clone());
                     }
                 }
             }

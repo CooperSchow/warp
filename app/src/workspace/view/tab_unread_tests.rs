@@ -339,14 +339,14 @@ fn the_unread_hint_shows_exactly_where_the_key_does_what_the_item_does() {
                                 .filter(|(index, _)| unread_set & (1 << index) != 0)
                                 .map(|(_, view)| *view)
                                 .collect();
-                            let reset = |workspace: &mut Workspace,
-                                         ctx: &mut ViewContext<Workspace>| {
-                                workspace.activate_tab(active, ctx);
-                                pane_group.update(ctx, |pane_group, ctx| {
-                                    pane_group.focus_pane_by_id(focused, ctx);
-                                });
-                                set_marks(&views, &unread, ctx);
-                            };
+                            let reset =
+                                |workspace: &mut Workspace, ctx: &mut ViewContext<Workspace>| {
+                                    workspace.activate_tab(active, ctx);
+                                    pane_group.update(ctx, |pane_group, ctx| {
+                                        pane_group.focus_pane_by_id(focused, ctx);
+                                    });
+                                    set_marks(&views, &unread, ctx);
+                                };
                             let rows = match (vertical, granularity) {
                                 (false, _) => vec![],
                                 (true, VerticalTabsDisplayGranularity::Tabs) => vec![focused],
@@ -354,19 +354,25 @@ fn the_unread_hint_shows_exactly_where_the_key_does_what_the_item_does() {
                             };
                             let targets = [None, Some(tab_target(pane_group_id, focused))]
                                 .into_iter()
-                                .chain(rows.into_iter().map(|row| Some(row_target(pane_group_id, row))));
+                                .chain(
+                                    rows.into_iter()
+                                        .map(|row| Some(row_target(pane_group_id, row))),
+                                );
                             for target in targets {
                                 let case = format!(
                                     "vertical {vertical}, {granularity:?}, tab {active} active, \
                                      focused {focused:?}, unread set {unread_set}, \
                                      row {:?}",
-                                    target.filter(|target| target.is_pane_row).map(|target| target.locator.pane_id)
+                                    target
+                                        .filter(|target| target.is_pane_row)
+                                        .map(|target| target.locator.pane_id)
                                 );
                                 reset(workspace, ctx);
                                 let (action, shown_hint) =
                                     unread_item_action_and_hint(workspace, 0, target, ctx);
 
-                                workspace.handle_action(&WorkspaceAction::ToggleActiveTabUnread, ctx);
+                                workspace
+                                    .handle_action(&WorkspaceAction::ToggleActiveTabUnread, ctx);
                                 let after_key = views.map(|view| is_unread(view, ctx));
                                 reset(workspace, ctx);
                                 workspace.handle_action(&action, ctx);
@@ -693,7 +699,11 @@ fn an_arrival_reads_notifications_at_once_as_upstream_or_after_the_dwell() {
             notify(&mut app);
             workspace.update(&mut app, |workspace, ctx| {
                 workspace.activate_tab(1, ctx);
-                assert_eq!(is_unread(second, ctx), tab_mark_unread, "on arrival, {context}");
+                assert_eq!(
+                    is_unread(second, ctx),
+                    tab_mark_unread,
+                    "on arrival, {context}"
+                );
                 workspace.activate_tab(0, ctx);
             });
             Timer::after(ARRIVAL_DWELL + Duration::from_millis(500)).await;

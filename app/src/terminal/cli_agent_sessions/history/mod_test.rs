@@ -20,10 +20,22 @@ fn captures_title_cwd_models_and_counts_human_turns() {
     assert_eq!(session.display_title(), "My Title");
     assert_eq!(session.message_count, 2);
     assert_eq!(session.cwd.as_deref(), Some("/home/me/proj"));
-    assert_eq!(session.last_activity.as_deref(), Some("2026-07-15T01:00:05Z"));
-    assert_eq!(session.first_activity.as_deref(), Some("2026-07-15T01:00:00Z"));
-    assert_eq!(session.last_activity_label(), Some("07-15 01:00".to_string()));
-    assert_eq!(session.first_activity_label(), Some("07-15 01:00".to_string()));
+    assert_eq!(
+        session.last_activity.as_deref(),
+        Some("2026-07-15T01:00:05Z")
+    );
+    assert_eq!(
+        session.first_activity.as_deref(),
+        Some("2026-07-15T01:00:00Z")
+    );
+    assert_eq!(
+        session.last_activity_label(),
+        Some("07-15 01:00".to_string())
+    );
+    assert_eq!(
+        session.first_activity_label(),
+        Some("07-15 01:00".to_string())
+    );
     assert!(session.models.contains("claude-opus-4-8"));
     assert_eq!(session.project_label(), "proj");
     assert_eq!(session.resume_command(), "claude --resume sess-1");
@@ -103,13 +115,14 @@ mod first_user_prompt_in_file {
         let prompt = format!("{} {}", "x".repeat(500), long_tail);
         let file = write_transcript(&[
             r#"{"type":"last-prompt","sessionId":"s"}"#,
-            &format!(
-                r#"{{"type":"user","message":{{"role":"user","content":"{prompt}"}}}}"#
-            ),
+            &format!(r#"{{"type":"user","message":{{"role":"user","content":"{prompt}"}}}}"#),
         ]);
 
         let read = first_user_prompt_in_file(file.path()).expect("prompt");
-        assert!(read.len() > 200, "must not be truncated to the 200-char snippet");
+        assert!(
+            read.len() > 200,
+            "must not be truncated to the 200-char snippet"
+        );
         assert!(read.ends_with(&long_tail));
     }
 
@@ -377,7 +390,10 @@ mod transcript_selection {
         write(dir.path(), "notes.txt", "hello");
         let real = write(dir.path(), "real.jsonl", "{}\n");
 
-        assert_eq!(transcripts_in_dir_created_after(dir.path(), since), vec![real]);
+        assert_eq!(
+            transcripts_in_dir_created_after(dir.path(), since),
+            vec![real]
+        );
     }
 
     #[test]

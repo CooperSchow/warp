@@ -5680,9 +5680,9 @@ fn compute_tab_group_color_mode(
     // A manual color override applies to the whole tab.
     if !matches!(tab.selected_color, SelectedTabColor::Unset) {
         return match tab.selected_color.resolve(tab.default_directory_color) {
-            Some(color) => TabGroupColorMode::Uniform(
-                color.to_color_u(&theme.terminal_colors().normal).into(),
-            ),
+            Some(color) => {
+                TabGroupColorMode::Uniform(color.to_color_u(&theme.terminal_colors().normal).into())
+            }
             None => TabGroupColorMode::None,
         };
     }

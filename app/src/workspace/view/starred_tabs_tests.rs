@@ -498,7 +498,9 @@ fn move_tab_to_other_window(
     slot: usize,
 ) -> (EntityId, usize) {
     let transferred = source
-        .read(app, |workspace, ctx| workspace.get_tab_transfer_info(index, ctx))
+        .read(app, |workspace, ctx| {
+            workspace.get_tab_transfer_info(index, ctx)
+        })
         .expect("the source keeps another tab");
     let pane_group_id = transferred.pane_group.id();
     source.update(app, |workspace, ctx| {

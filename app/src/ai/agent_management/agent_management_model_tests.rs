@@ -569,7 +569,10 @@ fn an_arrival_clears_a_mark() {
             let dwell = model
                 .record_terminal_focus(window, Some(marked), true, ctx)
                 .expect("an arrival from another terminal");
-            assert!(model.is_unread(marked), "nothing clears before the dwell ends");
+            assert!(
+                model.is_unread(marked),
+                "nothing clears before the dwell ends"
+            );
             model.finish_dwell(window, dwell, Some(marked), ctx);
             assert!(!model.is_unread(marked), "an arrival from another terminal");
 
@@ -689,7 +692,10 @@ fn arriving_from_outside_the_app_is_an_arrival() {
             // The notification click switches to b before the window is key.
             model.record_terminal_focus(clicked, Some(a), true, ctx);
             model.mark_unread(&[b], ctx);
-            assert_eq!(model.record_terminal_focus(clicked, Some(b), false, ctx), None);
+            assert_eq!(
+                model.record_terminal_focus(clicked, Some(b), false, ctx),
+                None
+            );
             let dwell = model
                 .record_terminal_focus(clicked, Some(b), true, ctx)
                 .expect("the window comes to the front on another pane");
@@ -700,8 +706,14 @@ fn arriving_from_outside_the_app_is_an_arrival() {
             // away and back while it was behind.
             model.record_terminal_focus(refocused, Some(c), true, ctx);
             model.mark_unread(&[c], ctx);
-            assert_eq!(model.record_terminal_focus(refocused, Some(a), false, ctx), None);
-            assert_eq!(model.record_terminal_focus(refocused, Some(c), false, ctx), None);
+            assert_eq!(
+                model.record_terminal_focus(refocused, Some(a), false, ctx),
+                None
+            );
+            assert_eq!(
+                model.record_terminal_focus(refocused, Some(c), false, ctx),
+                None
+            );
             assert_eq!(
                 model.record_terminal_focus(refocused, Some(c), true, ctx),
                 None,
@@ -1056,7 +1068,11 @@ impl Expected {
                 continue;
             }
             self.dwells_completed += 1;
-            if self.last_mark.get(&view).is_some_and(|mark| *mark > arrived) {
+            if self
+                .last_mark
+                .get(&view)
+                .is_some_and(|mark| *mark > arrived)
+            {
                 self.dwells_outlasted_by_a_mark += 1;
             }
             let clear = self.last_clear.entry(view).or_insert(arrived);

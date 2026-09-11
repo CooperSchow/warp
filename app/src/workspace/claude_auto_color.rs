@@ -65,7 +65,12 @@ fn rule_score(rule: &ClaudeAutoColorRule, haystack: &str) -> usize {
 /// needle. Without this, such a rule silently never matches anything.
 fn normalized_keyword(raw: &str) -> String {
     raw.trim()
-        .trim_matches(|c| matches!(c, '"' | '\'' | '\u{201c}' | '\u{201d}' | '\u{2018}' | '\u{2019}'))
+        .trim_matches(|c| {
+            matches!(
+                c,
+                '"' | '\'' | '\u{201c}' | '\u{201d}' | '\u{2018}' | '\u{2019}'
+            )
+        })
         .trim()
         .to_lowercase()
 }
@@ -253,8 +258,7 @@ mod tests {
             rule("SIA", "sia, portal, supabase"),
         ];
         assert_eq!(
-            best_rule_match(&rules, "the SIA PD portal on supabase")
-                .map(|r| r.name.as_str()),
+            best_rule_match(&rules, "the SIA PD portal on supabase").map(|r| r.name.as_str()),
             Some("SIA")
         );
     }
@@ -389,8 +393,14 @@ mod tests {
         let found = locate_first_prompt(None, None, Some(cwd.clone()), started_at);
 
         println!("cwd:      {cwd}");
-        println!("expected: {:?}", expected.as_deref().map(|p| &p[..p.len().min(60)]));
-        println!("found:    {:?}", found.as_deref().map(|p| &p[..p.len().min(60)]));
+        println!(
+            "expected: {:?}",
+            expected.as_deref().map(|p| &p[..p.len().min(60)])
+        );
+        println!(
+            "found:    {:?}",
+            found.as_deref().map(|p| &p[..p.len().min(60)])
+        );
         assert_eq!(
             found, expected,
             "must resolve the pane's own conversation, not the busiest one in the directory"

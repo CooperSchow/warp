@@ -54,14 +54,16 @@ fn shown_pane_rows(pane_group: &PaneGroup, rows: &[PaneId]) -> Vec<PaneId> {
 /// Whether any of `rows`, the pane rows a Panes-layout search shows for a tab,
 /// has the dot.
 fn pane_rows_show_unread(pane_group: &PaneGroup, rows: &[PaneId], app: &AppContext) -> bool {
-    shown_pane_rows(pane_group, rows).into_iter().any(|pane_id| {
-        row_shows_unread(
-            pane_group,
-            pane_id,
-            VerticalTabsDisplayGranularity::Panes,
-            app,
-        )
-    })
+    shown_pane_rows(pane_group, rows)
+        .into_iter()
+        .any(|pane_id| {
+            row_shows_unread(
+                pane_group,
+                pane_id,
+                VerticalTabsDisplayGranularity::Panes,
+                app,
+            )
+        })
 }
 
 /// The pane ⌘J focuses in the tab it jumps to, when activating the tab
@@ -102,7 +104,8 @@ impl Workspace {
             Ok(index) => {
                 let pane_group = self.tabs[index].pane_group.clone();
                 let rows = self.search_pane_rows(index, ctx);
-                let unread_pane = unread_pane_to_focus(pane_group.as_ref(ctx), rows.as_deref(), ctx);
+                let unread_pane =
+                    unread_pane_to_focus(pane_group.as_ref(ctx), rows.as_deref(), ctx);
                 self.activate_tab(index, ctx);
                 if let Some(pane_id) = unread_pane {
                     pane_group.update(ctx, |pane_group, ctx| {
@@ -140,11 +143,12 @@ impl Workspace {
                 .and_then(|(_, rows)| rows.as_deref());
             match rows {
                 None => unread[index],
-                Some(rows) => pane_rows_show_unread(self.tabs[index].pane_group.as_ref(ctx), rows, ctx),
+                Some(rows) => {
+                    pane_rows_show_unread(self.tabs[index].pane_group.as_ref(ctx), rows, ctx)
+                }
             }
         };
-        if let Some(index) = next_unread_tab(&visible, self.active_tab_index, a_row_shows_the_dot)
-        {
+        if let Some(index) = next_unread_tab(&visible, self.active_tab_index, a_row_shows_the_dot) {
             return Ok(index);
         }
         let other_tab_is_unread = unread

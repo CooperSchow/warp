@@ -102,10 +102,7 @@ pub const PLACEHOLDER_LABEL: &str = "5h — · wk —";
 impl ClaudeUsage {
     /// Compact always-visible label, e.g. `5h 7% · wk 9%`.
     pub fn pill_label(&self) -> String {
-        format!(
-            "5h {:.0}% · wk {:.0}%",
-            self.five_hour_pct, self.weekly_pct
-        )
+        format!("5h {:.0}% · wk {:.0}%", self.five_hour_pct, self.weekly_pct)
     }
 
     /// Multi-line detail shown on hover, including when each window resets.
@@ -381,7 +378,11 @@ async fn read_token() -> Option<String> {
         .map(str::to_owned);
     log::debug!(
         "[claude_usage] token read: {}",
-        if token.is_some() { "OK" } else { "missing accessToken" }
+        if token.is_some() {
+            "OK"
+        } else {
+            "missing accessToken"
+        }
     );
     token
 }

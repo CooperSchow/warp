@@ -24,9 +24,7 @@ use warpui::geometry::vector::vec2f;
 use warpui::platform::Cursor;
 use warpui::ui_components::components::{UiComponent, UiComponentStyles};
 use warpui::ui_components::slider::SliderStateHandle;
-use warpui::{
-    AppContext, Entity, SingletonEntity, TypedActionView, View, ViewContext, ViewHandle,
-};
+use warpui::{AppContext, Entity, SingletonEntity, TypedActionView, View, ViewContext, ViewHandle};
 
 use crate::appearance::Appearance;
 use crate::editor::{
@@ -499,12 +497,8 @@ impl View for ColorPickerPopover {
 
         // Hug the content: without an explicit width the overlay child takes
         // the full width of the settings pane.
-        let panel = Container::new(
-            ConstrainedBox::new(content)
-                .with_width(SV_WIDTH)
-                .finish(),
-        )
-        .with_uniform_padding(PANEL_PADDING)
+        let panel = Container::new(ConstrainedBox::new(content).with_width(SV_WIDTH).finish())
+            .with_uniform_padding(PANEL_PADDING)
             .with_background(theme.surface_2())
             .with_border(Border::all(1.).with_border_fill(theme.outline()))
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))

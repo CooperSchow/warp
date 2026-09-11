@@ -91,7 +91,6 @@ use warpui::accessibility::{
     AccessibilityContent, AccessibilityVerbosity, ActionAccessibilityContent, WarpA11yRole,
 };
 use warpui::clipboard::ClipboardContent;
-use warpui::r#async::Timer;
 #[cfg(target_family = "wasm")]
 use warpui::elements::Percentage;
 use warpui::elements::{
@@ -111,6 +110,7 @@ use warpui::notification::{NotificationSendError, RequestPermissionsOutcome, Use
 use warpui::platform::{
     Cursor, FilePickerConfiguration, FullscreenState, SystemTheme, TerminationMode,
 };
+use warpui::r#async::Timer;
 use warpui::text_layout::ClipConfig;
 use warpui::ui_components::button::{Button, ButtonVariant};
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
@@ -360,12 +360,10 @@ use crate::settings_view::{flags, SettingsSection, SettingsView, SettingsViewEve
 use crate::shell_indicator::ShellIndicatorType;
 use crate::tab::{
     bulk_close_label, color_picker_menu_items, tab_color_palette, tab_position_id,
-    uses_vertical_tabs,
-    ColorPickerTarget,
-    NewSessionMenuItem, PaneNameMenuTarget, SelectedTabColor, TabColor, TabBarState, TabComponent,
-    TabData,
-    TabTelemetryAction, COMPACT_TAB_WIDTH_THRESHOLD, MOVE_TO_GROUP_LABEL, TAB_BAR_BORDER_HEIGHT,
-    TAB_INDICATOR_HEIGHT, TAB_PIN_INDICATOR_ICON_SIZE, TAB_PIN_VANISH_THRESHOLD,
+    uses_vertical_tabs, ColorPickerTarget, NewSessionMenuItem, PaneNameMenuTarget,
+    SelectedTabColor, TabBarState, TabColor, TabComponent, TabData, TabTelemetryAction,
+    COMPACT_TAB_WIDTH_THRESHOLD, MOVE_TO_GROUP_LABEL, TAB_BAR_BORDER_HEIGHT, TAB_INDICATOR_HEIGHT,
+    TAB_PIN_INDICATOR_ICON_SIZE, TAB_PIN_VANISH_THRESHOLD,
 };
 use crate::tab_configs::action_sidecar::SidecarItemKind;
 use crate::tab_configs::remove_confirmation_dialog::{
@@ -385,9 +383,9 @@ use crate::terminal::available_shells::AvailableShell;
 #[cfg(target_os = "windows")]
 use crate::terminal::available_shells::AvailableShells;
 use crate::terminal::block_list_viewport::InputMode;
+use crate::terminal::cli_agent::CLIAgent;
 #[cfg(not(target_family = "wasm"))]
 use crate::terminal::cli_agent_sessions::plugin_manager::{plugin_manager_for, PluginModalKind};
-use crate::terminal::cli_agent::CLIAgent;
 use crate::terminal::cli_agent_sessions::{CLIAgentSessionsModel, CLIAgentSessionsModelEvent};
 use crate::terminal::enable_auto_reload_modal::{
     EnableAutoReloadModal, EnableAutoReloadModalEvent,
@@ -3739,7 +3737,9 @@ impl Workspace {
         ) && self.workspace_contains_terminal_view(event.terminal_view_id(), ctx)
         {
             match event {
-                CLIAgentSessionsModelEvent::Ended { terminal_view_id, .. } => {
+                CLIAgentSessionsModelEvent::Ended {
+                    terminal_view_id, ..
+                } => {
                     // Stop waiting on a conversation that ended before we
                     // could locate its first prompt.
                     self.claude_auto_color_pending.remove(terminal_view_id);
@@ -3825,12 +3825,7 @@ impl Workspace {
 
         ctx.spawn(
             async move {
-                claude_auto_color::locate_first_prompt(
-                    transcript_path,
-                    resume_id,
-                    cwd,
-                    started_at,
-                )
+                claude_auto_color::locate_first_prompt(transcript_path, resume_id, cwd, started_at)
             },
             move |me, first_prompt, ctx| {
                 me.finish_claude_auto_color_attempt(terminal_view_id, first_prompt, ctx);
@@ -5805,12 +5800,7 @@ impl Workspace {
         ctx.notify();
     }
 
-    pub fn toggle_tab_color(
-        &mut self,
-        index: usize,
-        color: TabColor,
-        ctx: &mut ViewContext<Self>,
-    ) {
+    pub fn toggle_tab_color(&mut self, index: usize, color: TabColor, ctx: &mut ViewContext<Self>) {
         if self.tabs.get(index).is_none() {
             log::warn!(
                 "Not toggling tab color: index was {index} but len is {}",

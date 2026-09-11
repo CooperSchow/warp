@@ -150,8 +150,11 @@ fn next_unread_tab_sweeps_every_small_tab_list() {
                         // In list order: down from the starting tab, then
                         // from the top, and the starting tab last.
                         if !others.is_empty() {
-                            let mut order: Vec<usize> =
-                                others.iter().copied().filter(|&index| index > active).collect();
+                            let mut order: Vec<usize> = others
+                                .iter()
+                                .copied()
+                                .filter(|&index| index > active)
+                                .collect();
                             order.extend(others.iter().copied().filter(|&index| index < active));
                             if visible.contains(&active) && unread(active) {
                                 order.push(active);
@@ -464,7 +467,10 @@ fn cmd_j_skips_a_tab_whose_unread_pane_the_search_hides() {
             workspace.jump_to_next_unread_tab(ctx);
             assert_eq!(workspace.active_tab_index, 0);
             assert_eq!(
-                workspace.tabs[0].pane_group.as_ref(ctx).focused_pane_id(ctx),
+                workspace.tabs[0]
+                    .pane_group
+                    .as_ref(ctx)
+                    .focused_pane_id(ctx),
                 unread
             );
         });
@@ -517,7 +523,11 @@ fn quick_cmd_j_presses_leave_the_tabs_they_pass_through_marked() {
                 marked.iter().all(|view| is_unread(*view, ctx)),
                 "no quick press clears a tab: stops {stops:?}"
             );
-            assert_eq!(stops, [1, 2, 3, 1], "quick presses step down the list and wrap");
+            assert_eq!(
+                stops,
+                [1, 2, 3, 1],
+                "quick presses step down the list and wrap"
+            );
             stops
         });
 

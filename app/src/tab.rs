@@ -1206,8 +1206,8 @@ impl TabStyles {
     /// implementing Default trait).
     fn default(appearance: &Appearance, tab_color: Option<TabColor>) -> TabStyles {
         let theme = appearance.theme();
-        let active_tab_bar_color: Option<ThemeFill> = tab_color
-            .map(|color| color.to_color_u(&theme.terminal_colors().normal).into());
+        let active_tab_bar_color: Option<ThemeFill> =
+            tab_color.map(|color| color.to_color_u(&theme.terminal_colors().normal).into());
         let error_color = theme.ui_error_color();
         let sharing_color = shared_session_indicator_color(appearance);
         let background = active_tab_bar_color.map(|color| {

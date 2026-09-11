@@ -105,7 +105,12 @@ fn first_prompt_snippet(text: &str) -> Option<String> {
     if text.is_empty() || text.starts_with('<') {
         return None;
     }
-    Some(text.chars().take(200).collect::<String>().replace('\n', " "))
+    Some(
+        text.chars()
+            .take(200)
+            .collect::<String>()
+            .replace('\n', " "),
+    )
 }
 
 /// Fold one transcript line into the accumulating session.
@@ -161,7 +166,11 @@ fn ingest_line(session: &mut ClaudeSession, line: &str) {
 }
 
 /// Parse a single `.jsonl` file's contents into a [`ClaudeSession`].
-fn parse_session(session_id: String, project_dir: String, lines: impl Iterator<Item = String>) -> ClaudeSession {
+fn parse_session(
+    session_id: String,
+    project_dir: String,
+    lines: impl Iterator<Item = String>,
+) -> ClaudeSession {
     let mut session = ClaudeSession {
         session_id,
         project_dir,
@@ -427,11 +436,7 @@ pub fn read_session_summary(path: &Path) -> Option<ClaudeSession> {
 
     let mut session = {
         let head = BufReader::new((&file).take(HEAD_SCAN_BYTES));
-        parse_session(
-            session_id,
-            project_dir,
-            head.lines().map_while(Result::ok),
-        )
+        parse_session(session_id, project_dir, head.lines().map_while(Result::ok))
     };
 
     if len > HEAD_SCAN_BYTES {
