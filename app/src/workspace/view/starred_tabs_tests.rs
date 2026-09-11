@@ -119,6 +119,48 @@ fn the_hairline_sits_under_the_starred_block_only_when_both_sides_show() {
     assert_eq!(cases, 4097);
 }
 
+/// The icon renderer tints a bundled icon with its ink and takes the icon's red
+/// channel as that ink's opacity, so the star must be drawn in white to paint
+/// at full strength. Filled with #121212, it painted at about 7% of the
+/// title's ink and all but vanished.
+#[test]
+fn the_star_is_drawn_in_white_so_it_paints_in_its_full_ink() {
+    use warpui::assets::AssetProvider as _;
+
+    let svg = crate::ASSETS
+        .get("bundled/svg/star-filled.svg")
+        .expect("the star is bundled");
+    let svg = std::str::from_utf8(&svg).expect("the star is text");
+    let paint_values = |attribute: &str| -> Vec<String> {
+        svg.match_indices(attribute)
+            .map(|(start, _)| {
+                let value = &svg[start + attribute.len()..];
+                value[..value.find('"').expect("a closing quote")].to_ascii_lowercase()
+            })
+            .collect()
+    };
+
+    // The root's `fill="none"` only says the canvas has no fill of its own.
+    let shape_fills: Vec<String> = paint_values(" fill=\"")
+        .into_iter()
+        .filter(|fill| fill != "none")
+        .collect();
+    assert!(!shape_fills.is_empty(), "the star's shape is filled");
+    for fill in &shape_fills {
+        assert!(
+            matches!(fill.as_str(), "white" | "#fff" | "#ffffff"),
+            "the star must be filled white, not {fill}"
+        );
+    }
+    for attribute in [" stroke=\"", " opacity=\"", " fill-opacity=\""] {
+        assert_eq!(
+            paint_values(attribute),
+            Vec::<String>::new(),
+            "a{attribute}..\" would dim the star"
+        );
+    }
+}
+
 /// A tab layout to paint, named for failure messages.
 #[derive(Clone, Copy)]
 struct Layout {
