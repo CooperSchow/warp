@@ -2460,6 +2460,15 @@ pub(crate) fn app_callbacks(
             );
         })),
         on_will_terminate: Some(Box::new(move |ctx| {
+            // Take one last snapshot of every window's tabs before the writer
+            // shuts down. Most quits have just saved, because leaving the app
+            // changes the active window, but a system-initiated quit (logout,
+            // restart, or the quit Apple Event a deploy sends) can arrive with
+            // nothing saved since a tab's Claude session last changed.
+            // `save_app` keeps its own guards and only hands the snapshot to
+            // the writer thread, which `terminate()` below drains and joins.
+            ctx.dispatch_global_action("workspace:save_app", &());
+
             NotebookManager::handle(ctx).update(ctx, |manager, ctx| {
                 // Notebooks are only saved periodically, so ensure that any pending changes have
                 // been sent to the writer thread before terminating.
