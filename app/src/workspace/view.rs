@@ -7930,17 +7930,16 @@ impl Workspace {
             == 1
     }
 
-    /// The tab menu's width in the vertical tabs panel with tags on: enough
-    /// for the widest label it can show, "Close Tabs Below (keep tagged)",
-    /// plus the items' 14 px padding on each side. It was sized for the
-    /// longer "(keep starred)" of 171.8 px in the menu's 12 px Roboto, so
-    /// there's a little room to spare. The group menu's widest, "Close tabs
-    /// above (keep tagged)", is narrower.
+    /// The tab menu's width in the vertical tabs panel with tags on: just
+    /// enough for the widest label it can show, "Close Tabs Below (keep
+    /// tagged)", about 171.1 px in the menu's 12 px Roboto, plus the items'
+    /// 14 px padding on each side. The group menu's widest, "Close tabs above
+    /// (keep tagged)", is narrower.
     const STARRED_TAB_MENU_WIDTH_VERTICAL: f32 = 200.;
 
     /// The same in the horizontal tab bar, whose widest label is "Close Tabs to
-    /// the Right (keep tagged)"; sized, as above, for "(keep starred)".
-    const STARRED_TAB_MENU_WIDTH_HORIZONTAL: f32 = 229.;
+    /// the Right (keep tagged)", 199.5 px.
+    const STARRED_TAB_MENU_WIDTH_HORIZONTAL: f32 = 228.;
 
     /// How wide the tab menu and the tab-group menu open. Upstream's width cut
     /// the fork's "(keep …)" labels off mid-word, so with tags on both open

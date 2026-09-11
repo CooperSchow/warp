@@ -1166,8 +1166,8 @@ struct Before {
 
 /// Seeded runs of 200 steps each: after every step the floating tabs are one
 /// block at the top of the list; no tab both floats and is grouped; an
-/// ungrouped tab floats exactly when it wears emoji and the setting is on, and
-/// never with it off; no tab wears more than three; the active tab is the same
+/// ungrouped tab that wears emoji floats while the setting is on, and none
+/// floats with it off; no tab wears more than three; the active tab is the same
 /// tab unless the step closed it or was meant to move focus; and no bulk close
 /// took a floating tab with it.
 #[test]
@@ -1236,13 +1236,20 @@ fn tagged_tabs_stay_one_block_at_the_top_through_any_sequence() {
                         );
                         assert!(tab.tags.len() <= 3, "{context}: {:?}", tab.tags);
                         if tab.group_id.is_none() && !matches!(step, Step::Reopen) {
-                            assert_eq!(
-                                tab.pinned,
-                                float && !tab.tags.is_empty(),
-                                "{context}: an ungrouped tab floats exactly when it's \
-                                 tagged and the setting is on ({:?})",
-                                tab.tags
-                            );
+                            if float {
+                                assert!(
+                                    tab.tags.is_empty() || tab.pinned,
+                                    "{context}: a tagged, ungrouped tab floats while the \
+                                     setting is on ({:?})",
+                                    tab.tags
+                                );
+                            } else {
+                                assert!(
+                                    !tab.pinned,
+                                    "{context}: nothing floats while the setting is off ({:?})",
+                                    tab.tags
+                                );
+                            }
                         }
                     }
                     let active = ids[workspace.active_tab_index];

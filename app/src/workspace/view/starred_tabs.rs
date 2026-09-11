@@ -13,7 +13,7 @@ use warpui::elements::{Align, ConstrainedBox, Element};
 use warpui::fonts::FamilyId;
 use warpui::{AppContext, EntityId, SingletonEntity, ViewContext};
 
-use super::tab_tags::{render_tags, TabTags, TITLE_TAG_SIZE};
+use super::tab_tags::{render_tags, worn_tags, TabTags, TITLE_TAG_SIZE};
 use super::Workspace;
 use crate::features::FeatureFlag;
 use crate::tab::{bulk_close_label, uses_vertical_tabs};
@@ -184,13 +184,15 @@ impl Workspace {
     }
 
     /// Brings every tab's float into line with its emoji and the "Float tagged
-    /// tabs to the top" setting: with it on, an ungrouped tab floats exactly
-    /// when it wears emoji; with it off, none floats. A tab floating with no
-    /// emoji of its own, as one starred before tags existed does, first takes
-    /// its ⭐ as a real emoji, so sinking it loses nothing it wore. A group's
-    /// members go where their group goes, whatever they wear. Runs after a
-    /// restore, when the setting changes, and after every action that saves,
-    /// which covers a tagged tab leaving its group.
+    /// tabs to the top" setting. With it on, an ungrouped tab that wears emoji
+    /// floats, and one floating with none of its own keeps floating, wearing
+    /// ⭐, as a tab starred before tags existed does; an explicit unpin stays
+    /// unpinned. With it off, none floats: a floating tab with no emoji of its
+    /// own first takes its ⭐ as a real emoji, so sinking it loses nothing it
+    /// wore. A group's members go where their group goes, whatever they wear.
+    /// Runs after a restore, when the setting changes, after undo-close, and
+    /// after every action that saves, which covers a tagged tab leaving its
+    /// group.
     pub(super) fn sync_tag_floats(&mut self, ctx: &mut ViewContext<Self>) {
         if !starred_tabs_enabled() {
             return;
@@ -203,20 +205,23 @@ impl Workspace {
             .map(|tab| tab.pane_group.id())
             .collect();
         let mut changed = false;
-        for pane_group_id in &ungrouped {
-            let Some(index) = self.tab_index_of(*pane_group_id) else {
-                continue;
-            };
-            let tab = &mut self.tabs[index];
-            if tab.pinned && tab.tags.is_empty() {
-                tab.tags = TabTags::star();
-                changed = true;
+        if !float {
+            for pane_group_id in &ungrouped {
+                let Some(index) = self.tab_index_of(*pane_group_id) else {
+                    continue;
+                };
+                let tab = &mut self.tabs[index];
+                if tab.pinned && tab.tags.is_empty() {
+                    tab.tags = TabTags::star();
+                    changed = true;
+                }
             }
         }
         let floats = |workspace: &Self, pane_group_id: EntityId| {
-            workspace
-                .tab_index_of(pane_group_id)
-                .is_some_and(|index| float && !workspace.tabs[index].tags.is_empty())
+            workspace.tab_index_of(pane_group_id).is_some_and(|index| {
+                let tab = &workspace.tabs[index];
+                float && !worn_tags(&tab.tags, tab.pinned).is_empty()
+            })
         };
         // Sink from the bottom of the block up, and float from the top of the
         // list down. Each tab lands at the block's edge, just past the ones
