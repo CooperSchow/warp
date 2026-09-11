@@ -252,7 +252,10 @@ reqwest = { version = "0.13", features = [
 ] }
 reqwest-eventsource = { package = "aha-reqwest-eventsource", version = "0.1" }
 resvg = "0.47.0"
-rust-embed = { version = "8.7.0", features = ["include-exclude"] }
+# "debug-embed" makes rust-embed compile assets INTO the binary in debug builds
+# too. Without it, debug builds read assets off disk from an absolute path
+# baked in at compile time, which breaks the app if the repo is ever moved.
+rust-embed = { version = "8.7.0", features = ["include-exclude", "debug-embed"] }
 rustc-hash = "2.1.1"
 rustls = "0.23.39"
 schemars = { version = "1", features = ["chrono04"] }
