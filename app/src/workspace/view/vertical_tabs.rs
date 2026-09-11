@@ -39,7 +39,7 @@ use super::starred_tabs::{
     render_star, row_shows_star, shows_pin_overlay, starred_divider_position, STAR_SLOT_WIDTH,
     STAR_TITLE_GAP,
 };
-use super::tab_unread::{row_shows_unread, tab_is_unread};
+use super::tab_unread::{render_unread_dot, row_shows_unread, tab_is_unread, unread_dot_ink};
 use super::{render_group_member_icon_collage, select_unique_pane_kinds};
 use crate::ai::agent::conversation::{ConversationStatus, StatusColorStyle};
 use crate::ai::cloud_environments::CloudAmbientAgentEnvironment;
@@ -3442,17 +3442,17 @@ fn resolve_icon_with_status_variant(
     }
 }
 
-const INDICATOR_DOT_SIZE: f32 = 8.;
-
-fn render_title_indicator(theme: &WarpTheme) -> Box<dyn Element> {
-    ConstrainedBox::new(
-        WarpIcon::CircleFilled
-            .to_warpui_icon(theme.accent())
-            .finish(),
-    )
-    .with_width(INDICATOR_DOT_SIZE)
-    .with_height(INDICATOR_DOT_SIZE)
-    .finish()
+/// The dot at the end of a row's title line: the unread dot, or upstream's
+/// Unsaved badge, which shares its slot. It's in the accent, except on the row
+/// drawn selected, the active tab's focused pane, where it takes the title's
+/// ink (see `tab_unread::unread_dot_ink`).
+fn render_title_indicator(theme: &WarpTheme, props: &PaneProps<'_>) -> Box<dyn Element> {
+    let on_selected_row = props.is_active_tab && props.is_focused;
+    render_unread_dot(unread_dot_ink(
+        theme.accent(),
+        theme.main_text_color(theme.background()),
+        on_selected_row,
+    ))
 }
 
 /// Line 1 of a row that wears its tab's star: the star in the title's ink, then
@@ -3592,7 +3592,7 @@ fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
         );
         if has_indicator {
             title_row.add_child(
-                Container::new(render_title_indicator(theme))
+                Container::new(render_title_indicator(theme, &props))
                     .with_margin_left(4.)
                     .finish(),
             );
@@ -4557,7 +4557,7 @@ fn render_terminal_row_content(
             .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
             .with_child(Shrinkable::new(1., first_line).finish())
             .with_child(
-                Container::new(render_title_indicator(theme))
+                Container::new(render_title_indicator(theme, &props))
                     .with_margin_left(4.)
                     .finish(),
             )
@@ -4861,7 +4861,7 @@ fn render_summary_tab_item(
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
                 .with_child(Shrinkable::new(1., title_region).finish())
                 .with_child(
-                    Container::new(render_title_indicator(theme))
+                    Container::new(render_title_indicator(theme, &props))
                         .with_margin_left(4.)
                         .finish(),
                 )
@@ -7453,7 +7453,7 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_child(Shrinkable::new(1., title_element).finish())
             .with_child(
-                Container::new(render_title_indicator(theme))
+                Container::new(render_title_indicator(theme, &props))
                     .with_margin_left(4.)
                     .finish(),
             )

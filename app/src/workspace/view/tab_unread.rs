@@ -5,15 +5,45 @@
 
 use std::time::Duration;
 
+use warp_core::ui::theme::Fill;
+use warp_core::ui::Icon;
+use warpui::elements::{ConstrainedBox, Element};
 use warpui::r#async::Timer;
 use warpui::{AppContext, EntityId, SingletonEntity, ViewContext, ViewHandle};
 
 use super::Workspace;
 use crate::ai::agent_management::{active_window_id, AgentNotificationsModel, DwellId};
+use crate::features::FeatureFlag;
 use crate::pane_group::{PaneGroup, PaneId};
 use crate::terminal::TerminalView;
 use crate::workspace::tab_settings::VerticalTabsDisplayGranularity;
 use crate::workspace::WorkspaceRegistry;
+
+/// The unread dot's size: a solid 8 px circle.
+pub(crate) const UNREAD_DOT_SIZE: f32 = 8.;
+
+/// The ink of an unread dot. The accent everywhere but on a selected row,
+/// whose strong tint all but swallows it: there, as on a selected message in
+/// macOS Mail, the dot takes the row's title ink. `on_selected_row` is the
+/// active tab's row in the horizontal tab bar, or in the vertical tabs panel
+/// the row drawn selected, the active tab's focused pane. Upstream never shows
+/// a dot on the active tab, so with `TabMarkUnread` off every dot keeps the
+/// accent, as upstream draws it.
+pub(crate) fn unread_dot_ink(accent: Fill, title_ink: Fill, on_selected_row: bool) -> Fill {
+    if on_selected_row && FeatureFlag::TabMarkUnread.is_enabled() {
+        title_ink
+    } else {
+        accent
+    }
+}
+
+/// The unread dot, in `ink` (see [`unread_dot_ink`]).
+pub(crate) fn render_unread_dot(ink: Fill) -> Box<dyn Element> {
+    ConstrainedBox::new(Icon::CircleFilled.to_warpui_icon(ink).finish())
+        .with_width(UNREAD_DOT_SIZE)
+        .with_height(UNREAD_DOT_SIZE)
+        .finish()
+}
 
 /// How long a mark staged after restore's commit waits for the window's first
 /// input before it's committed anyway.

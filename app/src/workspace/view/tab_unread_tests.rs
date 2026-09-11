@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use pathfinder_color::ColorU;
 use settings::Setting as _;
 use warp_errors::report_if_error;
 use warpui::platform::WindowStyle;
@@ -722,6 +723,196 @@ fn an_arrival_reads_notifications_at_once_as_upstream_or_after_the_dwell() {
             workspace.read(&app, |_, ctx| {
                 assert!(!is_unread(second, ctx), "after the dwell, {context}");
             });
+        });
+    }
+}
+
+/// A dot on the selected row takes the title's ink, and every other dot keeps
+/// the accent. With TabMarkUnread off, every dot keeps the accent.
+#[test]
+fn the_dot_takes_the_title_ink_on_a_selected_row_and_the_accent_elsewhere() {
+    use warp_core::ui::theme::Fill;
+
+    let accent = Fill::Solid(ColorU::new(0, 194, 255, 255));
+    let title_ink = Fill::Solid(ColorU::new(240, 240, 240, 230));
+    for tab_mark_unread in [false, true] {
+        let _unread = FeatureFlag::TabMarkUnread.override_enabled(tab_mark_unread);
+        for on_selected_row in [false, true] {
+            let expected = if tab_mark_unread && on_selected_row {
+                title_ink
+            } else {
+                accent
+            };
+            assert_eq!(
+                super::unread_dot_ink(accent, title_ink, on_selected_row).into_solid(),
+                expected.into_solid(),
+                "TabMarkUnread {tab_mark_unread}, selected {on_selected_row}"
+            );
+        }
+    }
+}
+
+/// The inks of the unread dots painted inside each tab's row or card, in tab
+/// order, from one paint of the workspace's whole window.
+fn painted_dot_inks(app: &mut App, workspace: &ViewHandle<Workspace>) -> Vec<Vec<ColorU>> {
+    use pathfinder_geometry::vector::{vec2f, vec2i};
+    use warpui::assets::asset_cache::{AssetCache, AssetSource, AssetState};
+    use warpui::image_cache::{AnimatedImageBehavior, CacheOption, FitType, Image, ImageCache};
+    use warpui::{Presenter, WindowInvalidation};
+
+    use crate::tab::tab_position_id;
+
+    let (window_id, tab_count) = workspace.read(app, |workspace, _| {
+        (workspace.window_id, workspace.tabs.len())
+    });
+    app.update(|ctx| {
+        let mut presenter = Presenter::new(window_id);
+        // The first frame asks for each icon; the second paints any that were
+        // still loading during the first.
+        let mut scene = None;
+        for _ in 0..2 {
+            let invalidation = WindowInvalidation {
+                updated: ctx.view_ids_for_window(window_id).into_iter().collect(),
+                ..Default::default()
+            };
+            presenter.invalidate(invalidation, ctx);
+            scene = Some(presenter.build_scene(vec2f(1280., 800.), 1., None, ctx));
+        }
+        let scene = scene.expect("the window was painted");
+        let AssetState::Loaded { data } = ImageCache::as_ref(ctx).image(
+            AssetSource::Bundled {
+                path: "bundled/svg/circle-filled.svg",
+            },
+            vec2i(8, 8),
+            FitType::Contain,
+            AnimatedImageBehavior::FullAnimation,
+            CacheOption::BySize,
+            None,
+            AssetCache::as_ref(ctx),
+        ) else {
+            panic!("the dot should load from the bundled assets");
+        };
+        let Image::Static(dot) = data.as_ref() else {
+            panic!("the dot should be a still image");
+        };
+        let positions = presenter.position_cache();
+        (0..tab_count)
+            .map(|index| {
+                let row = positions
+                    .get_position(tab_position_id(index))
+                    .unwrap_or_else(|| panic!("tab {index}'s row should be painted"));
+                scene
+                    .layers()
+                    .flat_map(|layer| &layer.icons)
+                    .filter(|icon| Arc::ptr_eq(&icon.asset, dot) && row.contains_rect(icon.bounds))
+                    .map(|icon| icon.color)
+                    .collect()
+            })
+            .collect()
+    })
+}
+
+/// Painted in every vertical layout, with the active tab split and its
+/// unfocused pane unread, and a background tab unread. In the Tabs layouts the
+/// active tab's one row is drawn selected and wears the dot in the title's
+/// ink; in the Panes layouts that dot sits on the unfocused pane's own row,
+/// which isn't selected, so it keeps the accent, as the background tab's does.
+/// With TabMarkUnread off, every dot keeps the accent.
+#[test]
+fn a_dot_on_the_selected_row_is_painted_in_the_title_ink() {
+    use crate::appearance::Appearance;
+    use crate::workspace::tab_settings::{VerticalTabsTabItemMode, VerticalTabsViewMode};
+
+    let _vertical_tabs = FeatureFlag::VerticalTabs.override_enabled(true);
+    let _summary = FeatureFlag::VerticalTabsSummaryMode.override_enabled(true);
+    for tab_mark_unread in [false, true] {
+        let _unread = FeatureFlag::TabMarkUnread.override_enabled(tab_mark_unread);
+        App::test(crate::ASSETS, |mut app| async move {
+            initialize_app(&mut app);
+            let workspace = mock_workspace(&mut app);
+            workspace.update(&mut app, |workspace, ctx| {
+                while workspace.tab_count() < 3 {
+                    workspace.add_terminal_tab(false, ctx);
+                }
+                workspace.activate_tab(0, ctx);
+                let (first, second) = split_into_two_terminals(workspace, 0, ctx);
+                let pane_group = workspace.tabs[0].pane_group.as_ref(ctx);
+                let unfocused = if pane_group.focused_pane_id(ctx) == first {
+                    second
+                } else {
+                    first
+                };
+                let unfocused = terminal_view_id(pane_group, unfocused, ctx);
+                let background = focused_terminal_view_id(workspace, 1, ctx);
+                set_marks(&[], &[unfocused, background], ctx);
+            });
+            let (title_ink, accent) = app.update(|ctx| {
+                let theme = Appearance::as_ref(ctx).theme();
+                (
+                    theme.main_text_color(theme.background()).into_solid(),
+                    theme.accent().into_solid(),
+                )
+            });
+            assert_ne!(title_ink, accent);
+
+            for (name, granularity, view_mode, item_mode) in [
+                (
+                    "compact tab rows",
+                    VerticalTabsDisplayGranularity::Tabs,
+                    VerticalTabsViewMode::Compact,
+                    VerticalTabsTabItemMode::FocusedSession,
+                ),
+                (
+                    "expanded tab rows",
+                    VerticalTabsDisplayGranularity::Tabs,
+                    VerticalTabsViewMode::Expanded,
+                    VerticalTabsTabItemMode::FocusedSession,
+                ),
+                (
+                    "summary cards",
+                    VerticalTabsDisplayGranularity::Tabs,
+                    VerticalTabsViewMode::Compact,
+                    VerticalTabsTabItemMode::Summary,
+                ),
+                (
+                    "compact pane rows",
+                    VerticalTabsDisplayGranularity::Panes,
+                    VerticalTabsViewMode::Compact,
+                    VerticalTabsTabItemMode::FocusedSession,
+                ),
+                (
+                    "expanded pane rows",
+                    VerticalTabsDisplayGranularity::Panes,
+                    VerticalTabsViewMode::Expanded,
+                    VerticalTabsTabItemMode::FocusedSession,
+                ),
+            ] {
+                TabSettings::handle(&app).update(&mut app, |settings, ctx| {
+                    report_if_error!(settings.use_vertical_tabs.set_value(true, ctx));
+                    report_if_error!(settings
+                        .vertical_tabs_display_granularity
+                        .set_value(granularity, ctx));
+                    report_if_error!(settings.vertical_tabs_view_mode.set_value(view_mode, ctx));
+                    report_if_error!(settings
+                        .vertical_tabs_tab_item_mode
+                        .set_value(item_mode, ctx));
+                });
+                workspace.update(&mut app, |workspace, _| {
+                    workspace.vertical_tabs_panel_open = true;
+                });
+                let selected_row_shows_the_dot =
+                    matches!(granularity, VerticalTabsDisplayGranularity::Tabs);
+                let active_tab_dot = if tab_mark_unread && selected_row_shows_the_dot {
+                    title_ink
+                } else {
+                    accent
+                };
+                assert_eq!(
+                    painted_dot_inks(&mut app, &workspace),
+                    vec![vec![active_tab_dot], vec![accent], vec![]],
+                    "{name}, TabMarkUnread {tab_mark_unread}"
+                );
+            }
         });
     }
 }
