@@ -8,6 +8,8 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use instant::Instant;
+use pathfinder_color::ColorU;
+use warp_core::ui::theme::Fill;
 use warp_util::standardized_path::StandardizedPath;
 use warpui::elements::{
     Align, ChildView, Container, Dismiss, DispatchEventResult, Empty, EventHandler, ParentElement,
@@ -25,7 +27,8 @@ use crate::appearance::Appearance;
 use crate::ui_components::blended_colors;
 use crate::ui_components::dialog::{dialog_styles, Dialog};
 use crate::view_components::action_button::{
-    ActionButton, DangerPrimaryTheme, KeystrokeSource, SecondaryTheme,
+    ActionButton, ActionButtonTheme, DisabledSecondaryTheme, KeystrokeSource, PrimaryTheme,
+    SecondaryTheme,
 };
 
 pub(crate) fn init(app: &mut AppContext) {
@@ -366,22 +369,52 @@ pub(crate) struct DeleteFileConfirmationDialog {
     delete_button_position_id: String,
 }
 
+/// The Delete button: a secondary button, outlined and unfilled like any other, with its label in
+/// the theme's red. It's the macOS alert convention for a destructive choice that isn't the
+/// default: the red label marks it as destructive, and the default, Cancel, is the button that
+/// stands out.
+struct DeleteButtonTheme;
+
+impl ActionButtonTheme for DeleteButtonTheme {
+    fn background(&self, hovered: bool, appearance: &Appearance) -> Option<Fill> {
+        SecondaryTheme.background(hovered, appearance)
+    }
+
+    fn text_color(
+        &self,
+        _hovered: bool,
+        _background: Option<Fill>,
+        appearance: &Appearance,
+    ) -> ColorU {
+        appearance.theme().ansi_fg_red()
+    }
+
+    fn border(&self, appearance: &Appearance) -> Option<ColorU> {
+        SecondaryTheme.border(appearance)
+    }
+}
+
 impl DeleteFileConfirmationDialog {
     pub(crate) fn new(ctx: &mut ViewContext<Self>) -> Self {
+        // Cancel is the default, the choice Return and Escape both make, so it's the primary
+        // button, the one that stands out, as in a macOS alert.
         let enter_keystroke = Keystroke::parse("enter").expect("Valid keystroke");
         let cancel_button = ctx.add_typed_action_view(|ctx| {
-            ActionButton::new("Cancel", SecondaryTheme)
+            ActionButton::new("Cancel", PrimaryTheme)
                 .with_keybinding(KeystrokeSource::Fixed(enter_keystroke), ctx)
                 .on_click(|ctx| {
                     ctx.dispatch_typed_action(DeleteFileConfirmationAction::Cancel);
                 })
         });
 
-        // No keybinding: the only way to delete is to click this button.
+        // No keybinding: the only way to delete is to click this button. While it arms it's
+        // greyed out, keeping its outline so it doesn't change size when it arms.
         let delete_button = ctx.add_typed_action_view(|_| {
-            ActionButton::new("Delete", DangerPrimaryTheme).on_click(|ctx| {
-                ctx.dispatch_typed_action(DeleteFileConfirmationAction::Confirm);
-            })
+            ActionButton::new("Delete", DeleteButtonTheme)
+                .with_disabled_theme(DisabledSecondaryTheme)
+                .on_click(|ctx| {
+                    ctx.dispatch_typed_action(DeleteFileConfirmationAction::Confirm);
+                })
         });
 
         let view_id = ctx.view_id();
