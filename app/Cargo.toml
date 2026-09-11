@@ -687,6 +687,12 @@ default = [
     # remember to pass the feature flags.
     "claude_conversations",
     "claude_usage",
+    # Eqho fork: tab marks. Stars are upstream's pinned tabs wearing a star, so
+    # pinned_tabs ships with starred_tabs; Mark as Unread shares their menu
+    # section and their pane_marks table.
+    "pinned_tabs",
+    "starred_tabs",
+    "tab_mark_unread",
     "git_credential_refresh",
     "oz_handoff",
     "handoff_local_cloud",
