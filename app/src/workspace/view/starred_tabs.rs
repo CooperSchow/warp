@@ -2,8 +2,8 @@
 //! wearing a star: it sits in the block at the top of the tab list, and bulk
 //! closes leave it open.
 //!
-//! The star has one look wherever it appears: a 10 px solid star in the ink of
-//! the title it leads, taking no clicks of its own.
+//! The star has one look wherever it appears: a solid star in the ink of the
+//! title it leads, sized to that title, taking no clicks of its own.
 
 use warp_core::ui::theme::Fill;
 use warp_core::ui::Icon;
@@ -28,19 +28,33 @@ pub(crate) const STAR_TITLE_GAP: f32 = 4.;
 /// indented by it, so each line's text starts where the title's does.
 pub(crate) const STAR_SLOT_WIDTH: f32 = STAR_SIZE + STAR_TITLE_GAP;
 
+/// The star before a Panes-layout tab header's 10 px label: the title's star
+/// scaled with its text, as near 10/12 of it as whole pixels allow, so it spans
+/// the label's capitals as the title's star spans the title's.
+pub(crate) const HEADER_STAR_SIZE: f32 = 8.;
+
+/// The gap between a header's star and its label, the title's gap scaled the
+/// same way.
+pub(crate) const HEADER_STAR_TITLE_GAP: f32 = 3.;
+
 /// Whether stars are on: the pinned-tabs engine and the fork's star re-skin
 /// of it, both.
 pub(crate) fn starred_tabs_enabled() -> bool {
     FeatureFlag::PinnedTabs.is_enabled() && FeatureFlag::StarredTabs.is_enabled()
 }
 
-/// The star, in `ink`. It's only a mark, with no hover state and no click of
-/// its own, so a click on it lands on the row like a click anywhere else and a
-/// stray one can never unstar a tab.
+/// The star, in `ink`, at the size that suits a 12 px title.
 pub(crate) fn render_star(ink: Fill) -> Box<dyn Element> {
+    render_star_sized(ink, STAR_SIZE)
+}
+
+/// The star, in `ink`, in a `size` square. It's only a mark, with no hover
+/// state and no click of its own, so a click on it lands on the row like a
+/// click anywhere else and a stray one can never unstar a tab.
+pub(crate) fn render_star_sized(ink: Fill, size: f32) -> Box<dyn Element> {
     ConstrainedBox::new(Icon::StarFilled.to_warpui_icon(ink).finish())
-        .with_width(STAR_SIZE)
-        .with_height(STAR_SIZE)
+        .with_width(size)
+        .with_height(size)
         .finish()
 }
 
@@ -59,12 +73,53 @@ pub(crate) fn render_pin_slot_mark(slot_size: f32, ink: Fill) -> Box<dyn Element
         .finish()
 }
 
-/// Whether a vertical tabs row wears its tab's star: the first row of a starred
-/// tab, and no other, so a split tab drawn one row per pane has one star. A
-/// member of a starred group isn't starred itself; its group header wears the
-/// star, as the group's one row.
-pub(super) fn row_shows_star(tab_is_starred: bool, is_first_row_of_tab: bool) -> bool {
-    starred_tabs_enabled() && tab_is_starred && is_first_row_of_tab
+/// What the head of a vertical tabs row wears for its tab's star.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum RowStar {
+    /// Nothing: the tab isn't starred, or its header wears the star.
+    #[default]
+    None,
+    /// The star, before the title.
+    Star,
+    /// The star's slot, left empty: the later rows of a tab whose first row
+    /// wears the star, so their titles line up under its title.
+    Inset,
+}
+
+impl RowStar {
+    /// Whether the row's lines start after the star's slot.
+    pub(super) fn is_indented(self) -> bool {
+        self != RowStar::None
+    }
+}
+
+/// What a vertical tabs row wears for its tab's star. A starred tab wears one
+/// star: on its header in the Panes layout when the panel draws one
+/// (`header_wears_star`, see [`header_shows_star`]), and otherwise on its
+/// first row, with its other rows inset so their titles line up. So a split
+/// tab drawn one row per pane still has one star. A member of a starred group
+/// isn't starred itself; its group header wears the star, as the group's one
+/// row.
+pub(super) fn row_star(
+    tab_is_starred: bool,
+    is_first_row_of_tab: bool,
+    header_wears_star: bool,
+) -> RowStar {
+    if !starred_tabs_enabled() || !tab_is_starred || header_wears_star {
+        RowStar::None
+    } else if is_first_row_of_tab {
+        RowStar::Star
+    } else {
+        RowStar::Inset
+    }
+}
+
+/// Whether a Panes-layout tab header wears its tab's star: stars are on, the
+/// tab is starred and the panel draws its header. The star belongs to the tab,
+/// and the header is the tab's own label, so it goes there rather than on any
+/// one pane's row.
+pub(super) fn header_shows_star(tab_is_starred: bool, header_is_drawn: bool) -> bool {
+    starred_tabs_enabled() && tab_is_starred && header_is_drawn
 }
 
 /// Whether upstream's pin overlay shows on a pinned row or group header. That's

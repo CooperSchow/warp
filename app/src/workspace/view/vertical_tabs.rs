@@ -36,7 +36,8 @@ use warpui::ui_components::text_input::TextInput;
 use warpui::{AppContext, EntityId, SingletonEntity, ViewHandle, WindowId};
 
 use super::starred_tabs::{
-    render_star, row_shows_star, shows_pin_overlay, starred_divider_position, STAR_SLOT_WIDTH,
+    header_shows_star, render_star, render_star_sized, row_star, shows_pin_overlay,
+    starred_divider_position, RowStar, HEADER_STAR_SIZE, HEADER_STAR_TITLE_GAP, STAR_SLOT_WIDTH,
     STAR_TITLE_GAP,
 };
 use super::tab_unread::{render_unread_dot, row_shows_unread, tab_is_unread, unread_dot_ink};
@@ -416,7 +417,7 @@ fn render_pane_row_element(
         is_pinned,
         container_is_hovered,
         row_unread: _,
-        shows_star: _,
+        star: _,
     } = props;
     let is_selected = is_active_tab && is_focused;
     let show_pin = shows_pin_overlay(is_pinned, container_is_hovered);
@@ -896,10 +897,10 @@ struct PaneProps<'a> {
     container_is_hovered: bool,
     /// Whether this row shows the unread dot (see `tab_unread::row_shows_unread`).
     row_unread: bool,
-    /// Whether this row wears its tab's star (see `starred_tabs::row_shows_star`).
-    /// False until the renderer, which knows where the row falls in its tab,
-    /// sets it.
-    shows_star: bool,
+    /// What this row wears for its tab's star (see `starred_tabs::row_star`).
+    /// Nothing until the renderer, which knows where the row falls in its tab
+    /// and whether the tab's header wears the star, sets it.
+    star: RowStar,
 }
 
 struct PaneRowState {
@@ -1020,6 +1021,8 @@ struct GroupHeaderProps<'a> {
     is_being_renamed: bool,
     rename_editor: ViewHandle<EditorView>,
     header_mouse_state: MouseStateHandle,
+    /// Whether the header wears its tab's star (see `starred_tabs::header_shows_star`).
+    wears_star: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1990,6 +1993,9 @@ fn render_groups(
         if starred_divider_at == Some(i) {
             groups.add_child(render_starred_divider(uses_outer_group_container, theme));
         }
+        // In the Panes layout the divider is the line along the next tab's top,
+        // so that tab leaves its own out.
+        let follows_starred_divider = uses_outer_group_container && starred_divider_at == Some(i);
         if ghost_insertion_index == Some(tab_index) {
             groups.add_child(render_ghost_vertical_tab_slot(workspace, app));
         }
@@ -2018,6 +2024,7 @@ fn render_groups(
                     members,
                     last_member_after_index,
                     is_any_pane_dragging,
+                    follows_starred_divider,
                     app,
                 ));
                 i += run_len;
@@ -2040,6 +2047,7 @@ fn render_groups(
                         insert_after_index,
                     },
                     false, // in_tab_group
+                    follows_starred_divider,
                     app,
                 ));
                 i += 1;
@@ -2101,6 +2109,7 @@ fn render_tab_group(
     filtered_pane_ids: Option<&[PaneId]>,
     drag_state: TabGroupDragState,
     in_tab_group: bool,
+    follows_starred_divider: bool,
     app: &AppContext,
 ) -> Box<dyn Element> {
     render_tab_group_internal(
@@ -2112,6 +2121,7 @@ fn render_tab_group(
         drag_state,
         false,
         in_tab_group,
+        follows_starred_divider,
         app,
     )
 }
@@ -2126,6 +2136,7 @@ fn render_tab_group_internal(
     drag_state: TabGroupDragState,
     for_drag_ghost: bool,
     in_tab_group: bool,
+    follows_starred_divider: bool,
     app: &AppContext,
 ) -> Box<dyn Element> {
     let appearance = Appearance::as_ref(app);
@@ -2193,7 +2204,9 @@ fn render_tab_group_internal(
         && !workspace
             .current_workspace_state
             .is_agent_management_view_open;
-    let has_top_border = tab_index > 0;
+    // In the Panes layout each tab draws the line along its top, except the
+    // first one past the starred block, where the block's divider is that line.
+    let has_top_border = tab_index > 0 && !follows_starred_divider;
     let is_first_tab = tab_index == 0;
     let is_last_tab = tab_index + 1 == workspace.tabs.len();
     let is_this_tab_dragging = tab.draggable_state.is_dragging();
@@ -2234,6 +2247,12 @@ fn render_tab_group_internal(
         pane_id: pane_group.focused_pane_id(app),
     };
 
+    let show_header =
+        should_show_tab_group_header(has_custom_title, is_being_renamed, visible_pane_ids.len());
+    // In the Panes layout a starred tab's header, its own label, wears its
+    // star, and its pane rows wear none.
+    let header_wears_star =
+        uses_outer_group_container && header_shows_star(tab.pinned, show_header);
     let mut group_element = Hoverable::new(group_mouse_state, move |group_state| {
         // GroupedTabs: stack panes flush in Panes view.
         let stack_panes_flush = FeatureFlag::GroupedTabs.is_enabled()
@@ -2306,7 +2325,7 @@ fn render_tab_group_internal(
                     return Empty::new().finish();
                 };
                 // A Summary card is its tab's one row.
-                pane_props.shows_star = row_shows_star(tab.pinned, true);
+                pane_props.star = row_star(tab.pinned, true, false);
                 rows.add_child(render_summary_tab_item(
                     pane_props,
                     summary
@@ -2372,7 +2391,7 @@ fn render_tab_group_internal(
                         is_last: row_idx + 1 == total_rows,
                     };
                 }
-                pane_props.shows_star = row_shows_star(tab.pinned, row_idx == 0);
+                pane_props.star = row_star(tab.pinned, row_idx == 0, header_wears_star);
                 let view_mode = *TabSettings::as_ref(app).vertical_tabs_view_mode.value();
                 let row = match view_mode {
                     VerticalTabsViewMode::Compact => render_compact_pane_row(pane_props, app),
@@ -2383,11 +2402,6 @@ fn render_tab_group_internal(
             rows.finish()
         };
 
-        let show_header = should_show_tab_group_header(
-            has_custom_title,
-            is_being_renamed,
-            visible_pane_ids.len(),
-        );
         let group_content = if uses_outer_group_container {
             let mut group = Flex::column()
                 .with_main_axis_size(MainAxisSize::Min)
@@ -2400,6 +2414,7 @@ fn render_tab_group_internal(
                         is_being_renamed,
                         rename_editor: rename_editor.clone(),
                         header_mouse_state: group_header_mouse_state.clone(),
+                        wears_star: header_wears_star,
                     },
                     app,
                 ));
@@ -2764,6 +2779,7 @@ pub(crate) fn render_tab_group_for_drag_ghost(
         drag_state,
         true,  // for_drag_ghost
         false, // in_tab_group
+        false, // follows_starred_divider
         app,
     )
 }
@@ -2880,13 +2896,13 @@ fn render_grouped_tabs_header(
         .with_color(sub_text_color.into())
         .finish();
     // A starred group's header is the group's one row, so it wears the star.
-    let shows_star = row_shows_star(group.pinned, true);
+    let star = row_star(group.pinned, true, false);
     let text_column: Box<dyn Element> = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Start)
         .with_spacing(1.)
-        .with_child(title_with_star(title_element, shows_star, theme))
-        .with_child(under_star(subtitle, shows_star))
+        .with_child(title_with_star(title_element, star, theme))
+        .with_child(under_star(subtitle, star))
         .finish();
 
     let action_buttons = if show_action_buttons {
@@ -3027,6 +3043,7 @@ fn render_grouped_tabs_header(
 /// Renders a tab group: pane-like header followed by indented member rows. A colored group tints the
 /// container (and header) with the group's color as a backdrop; member rows carry their own colors and
 /// layer on top. An uncolored group only paints its background on hover or when a member is active.
+#[allow(clippy::too_many_arguments)]
 fn render_grouped_tab_container(
     state: &VerticalTabsPanelState,
     workspace: &Workspace,
@@ -3034,6 +3051,7 @@ fn render_grouped_tab_container(
     members: &[(usize, Option<Vec<PaneId>>)],
     last_member_after_index: Option<usize>,
     is_any_pane_dragging: bool,
+    follows_starred_divider: bool,
     app: &AppContext,
 ) -> Box<dyn Element> {
     let appearance = Appearance::as_ref(app);
@@ -3153,6 +3171,7 @@ fn render_grouped_tab_container(
                     filtered_pane_ids.as_deref(),
                     drag_state,
                     true,
+                    false,
                     app,
                 );
                 content.add_child(
@@ -3211,10 +3230,16 @@ fn render_grouped_tab_container(
         if needs_outer_horizontal_padding {
             // Pane view: match regular tab containers — flat corners with a top
             // divider (plus a bottom divider when this is the last item) rather
-            // than a rounded card.
+            // than a rounded card. Right past the starred block, that block's
+            // divider is the top one.
             container = container.with_border(
                 Border::new(1.)
-                    .with_sides(true, false, last_member_after_index.is_some(), false)
+                    .with_sides(
+                        !follows_starred_divider,
+                        false,
+                        last_member_after_index.is_some(),
+                        false,
+                    )
                     .with_border_fill(internal_colors::fg_overlay_1(theme)),
             );
         } else {
@@ -3306,6 +3331,7 @@ fn render_group_header(props: GroupHeaderProps<'_>, app: &AppContext) -> Box<dyn
         is_being_renamed,
         rename_editor,
         header_mouse_state,
+        wears_star,
     } = props;
     let appearance = Appearance::as_ref(app);
     let theme = appearance.theme();
@@ -3319,7 +3345,7 @@ fn render_group_header(props: GroupHeaderProps<'_>, app: &AppContext) -> Box<dyn
     let title_color = theme.sub_text_color(theme.background());
 
     Hoverable::new(header_mouse_state, move |_header_state| {
-        Container::new(if is_being_renamed {
+        let label = if is_being_renamed {
             TextInput::new(
                 rename_editor.clone(),
                 UiComponentStyles::default()
@@ -3334,15 +3360,16 @@ fn render_group_header(props: GroupHeaderProps<'_>, app: &AppContext) -> Box<dyn
                 .with_clip(ClipConfig::ellipsis())
                 .with_color(title_color.into())
                 .finish()
-        })
-        .with_padding(
-            Padding::uniform(0.)
-                .with_left(GROUP_HORIZONTAL_PADDING)
-                .with_right(GROUP_HORIZONTAL_PADDING)
-                .with_top(GROUP_HEADER_VERTICAL_PADDING)
-                .with_bottom(GROUP_HEADER_VERTICAL_PADDING),
-        )
-        .finish()
+        };
+        Container::new(header_label_with_star(label, wears_star, title_color))
+            .with_padding(
+                Padding::uniform(0.)
+                    .with_left(GROUP_HORIZONTAL_PADDING)
+                    .with_right(GROUP_HORIZONTAL_PADDING)
+                    .with_top(GROUP_HEADER_VERTICAL_PADDING)
+                    .with_bottom(GROUP_HEADER_VERTICAL_PADDING),
+            )
+            .finish()
     })
     .on_click(move |ctx, _, _| {
         if !is_being_renamed {
@@ -3455,35 +3482,37 @@ fn render_title_indicator(theme: &WarpTheme, props: &PaneProps<'_>) -> Box<dyn E
     ))
 }
 
-/// Line 1 of a row that wears its tab's star: the star in the title's ink, then
-/// the title, which keeps its own clipping in the width left. The star's box is
-/// centred on the title's line, which its glyph is drawn to sit on. Any other
-/// row's line 1 is the title alone, untouched.
-fn title_with_star(
-    title: Box<dyn Element>,
-    shows_star: bool,
-    theme: &WarpTheme,
-) -> Box<dyn Element> {
-    if !shows_star {
-        return title;
+/// Line 1 of a row, with what it wears for its tab's star (see
+/// `starred_tabs::row_star`): the star in the title's ink and then the title,
+/// which keeps its own clipping in the width left; or the star's slot, left
+/// empty, so the title lines up under the first title of a tab whose first row
+/// wears the star. The star's box is centred on the title's line, which its
+/// glyph is drawn to sit on. Any other row's line 1 is the title alone,
+/// untouched.
+fn title_with_star(title: Box<dyn Element>, star: RowStar, theme: &WarpTheme) -> Box<dyn Element> {
+    match star {
+        RowStar::None => title,
+        RowStar::Inset => Container::new(title)
+            .with_margin_left(STAR_SLOT_WIDTH)
+            .finish(),
+        RowStar::Star => Flex::row()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(
+                Container::new(render_star(theme.main_text_color(theme.background())))
+                    .with_margin_right(STAR_TITLE_GAP)
+                    .finish(),
+            )
+            .with_child(Shrinkable::new(1., title).finish())
+            .finish(),
     }
-    Flex::row()
-        .with_main_axis_size(MainAxisSize::Min)
-        .with_cross_axis_alignment(CrossAxisAlignment::Center)
-        .with_child(
-            Container::new(render_star(theme.main_text_color(theme.background())))
-                .with_margin_right(STAR_TITLE_GAP)
-                .finish(),
-        )
-        .with_child(Shrinkable::new(1., title).finish())
-        .finish()
 }
 
-/// A later line of a row that wears its tab's star, indented by the star's slot
-/// so its text starts where the title's does rather than under the star. Any
-/// other row's lines are untouched.
-fn under_star(line: Box<dyn Element>, shows_star: bool) -> Box<dyn Element> {
-    if shows_star {
+/// A later line of a row that wears its tab's star or the star's slot,
+/// indented by the slot so its text starts where the title's does rather than
+/// under the star. Any other row's lines are untouched.
+fn under_star(line: Box<dyn Element>, star: RowStar) -> Box<dyn Element> {
+    if star.is_indented() {
         Container::new(line)
             .with_margin_left(STAR_SLOT_WIDTH)
             .finish()
@@ -3492,44 +3521,56 @@ fn under_star(line: Box<dyn Element>, shows_star: bool) -> Box<dyn Element> {
     }
 }
 
+/// A Panes-layout tab header's label, led by its tab's star when the header
+/// wears it: the star sized for the header's 10 px text and in the label's
+/// ink, its box centred on the label's line as a row's star is on its title.
+fn header_label_with_star(
+    label: Box<dyn Element>,
+    wears_star: bool,
+    ink: WarpThemeFill,
+) -> Box<dyn Element> {
+    if !wears_star {
+        return label;
+    }
+    Flex::row()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_child(
+            Container::new(render_star_sized(ink, HEADER_STAR_SIZE))
+                .with_margin_right(HEADER_STAR_TITLE_GAP)
+                .finish(),
+        )
+        .with_child(Shrinkable::new(1., label).finish())
+        .finish()
+}
+
 /// Space above and below the starred block's hairline in the card layouts, on
 /// top of the list's own 4 px spacing: a 13 px break, against 4 px between rows.
 const STARRED_DIVIDER_MARGIN: f32 = 2.;
 
-/// In the Panes layout, the gap between the line that closes the starred block
-/// and the next tab's own top line.
-const STARRED_DIVIDER_PANES_GAP: f32 = 8.;
-
-/// The hairline that closes the starred block. In the card layouts (Tabs and
-/// Summary) it's this panel's divider, the settings popup's 1 px `fg_overlay_2`
-/// line, spanning the rows' width. In the Panes layout, where full-bleed
-/// `fg_overlay_1` lines already divide the tabs, it closes the block with that
-/// same line, and a gap before the next tab's line marks the break.
+/// The hairline that closes the starred block: this panel's divider, the
+/// settings popup's 1 px `fg_overlay_2` line. In the card layouts (Tabs and
+/// Summary) it spans the rows' width, with a little space above and below. In
+/// the Panes layout, where full-bleed `fg_overlay_1` lines divide the tabs, it
+/// takes the place of the line along the next tab's top, which that tab then
+/// leaves out, so the block ends with one line, in the divider's stronger ink.
 fn render_starred_divider(uses_outer_group_container: bool, theme: &WarpTheme) -> Box<dyn Element> {
-    let (fill, margin_top, margin_bottom) = if uses_outer_group_container {
-        (
-            internal_colors::fg_overlay_1(theme),
-            0.,
-            STARRED_DIVIDER_PANES_GAP,
-        )
+    let margin = if uses_outer_group_container {
+        0.
     } else {
-        (
-            internal_colors::fg_overlay_2(theme),
-            STARRED_DIVIDER_MARGIN,
-            STARRED_DIVIDER_MARGIN,
-        )
+        STARRED_DIVIDER_MARGIN
     };
     Container::new(
         ConstrainedBox::new(
             Container::new(Empty::new().finish())
-                .with_background(fill)
+                .with_background(internal_colors::fg_overlay_2(theme))
                 .finish(),
         )
         .with_height(1.)
         .finish(),
     )
-    .with_margin_top(margin_top)
-    .with_margin_bottom(margin_bottom)
+    .with_margin_top(margin)
+    .with_margin_bottom(margin)
     .finish()
 }
 
@@ -3584,7 +3625,7 @@ fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
                         appearance,
                         app,
                     ),
-                    props.shows_star,
+                    props.star,
                     theme,
                 ),
             )
@@ -3615,7 +3656,7 @@ fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
                     .with_clip(subtitle_clip)
                     .with_color(theme.sub_text_color(theme.background()).into())
                     .finish(),
-                props.shows_star,
+                props.star,
             ));
         }
 
@@ -3995,7 +4036,7 @@ impl<'a> PaneProps<'a> {
             is_pinned,
             container_is_hovered,
             row_unread: row_shows_unread(pane_group, pane_id, display_granularity, app),
-            shows_star: false,
+            star: RowStar::None,
         })
     }
 
@@ -4549,7 +4590,7 @@ fn render_terminal_row_content(
         }
     };
 
-    let first_line = title_with_star(first_line, props.shows_star, theme);
+    let first_line = title_with_star(first_line, props.star, theme);
     let first_line_element = if props.row_unread {
         Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
@@ -4572,7 +4613,7 @@ fn render_terminal_row_content(
     content.add_child(first_line_element);
     content.add_child(under_star(
         Container::new(second_line).with_margin_top(2.).finish(),
-        props.shows_star,
+        props.star,
     ));
     content.add_child(under_star(
         Container::new(render_terminal_metadata_line(
@@ -4587,7 +4628,7 @@ fn render_terminal_row_content(
         ))
         .with_margin_top(2.)
         .finish(),
-        props.shows_star,
+        props.star,
     ));
     content.finish()
 }
@@ -4794,7 +4835,7 @@ fn render_summary_tab_item(
         .with_cross_axis_alignment(CrossAxisAlignment::Start);
     // A starred tab's card leads its first line with the star, and indents every
     // line after it to line up with that line's text.
-    let shows_star = props.shows_star;
+    let star = props.star;
     if let Some(title_override) = render_title_override(
         &props,
         12.,
@@ -4803,11 +4844,11 @@ fn render_summary_tab_item(
         appearance,
         app,
     ) {
-        title_region.add_child(title_with_star(title_override, shows_star, theme));
+        title_region.add_child(title_with_star(title_override, star, theme));
     } else if summary.primary_labels.is_empty() {
         title_region.add_child(title_with_star(
             render_text_line(&props.title, main_text_color, ClipConfig::end(), appearance),
-            shows_star,
+            star,
             theme,
         ));
     } else {
@@ -4826,13 +4867,13 @@ fn render_summary_tab_item(
                 appearance,
             );
             title_region.add_child(if idx == 0 {
-                title_with_star(line, shows_star, theme)
+                title_with_star(line, star, theme)
             } else {
                 under_star(
                     Container::new(line)
                         .with_margin_top(INTRA_REGION_GAP)
                         .finish(),
-                    shows_star,
+                    star,
                 )
             });
         }
@@ -4848,7 +4889,7 @@ fn render_summary_tab_item(
                 ))
                 .with_margin_top(INTRA_REGION_GAP)
                 .finish(),
-                shows_star,
+                star,
             ));
         }
     }
@@ -4896,7 +4937,7 @@ fn render_summary_tab_item(
             ))
             .with_margin_top(margin)
             .finish(),
-            shows_star,
+            star,
         ));
     }
     let hidden_directory_count = summary_overflow_count(
@@ -4917,7 +4958,7 @@ fn render_summary_tab_item(
             ))
             .with_margin_top(margin)
             .finish(),
-            shows_star,
+            star,
         ));
     }
 
@@ -4938,7 +4979,7 @@ fn render_summary_tab_item(
             ))
             .with_margin_top(REGION_GAP)
             .finish(),
-            shows_star,
+            star,
         ));
     }
 
@@ -4953,7 +4994,7 @@ fn render_summary_tab_item(
             ))
             .with_margin_top(REGION_GAP)
             .finish(),
-            shows_star,
+            star,
         ));
     }
 
@@ -7442,8 +7483,8 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
             };
             (title, subtitle)
         };
-    let title_element = title_with_star(title_element, props.shows_star, theme);
-    let subtitle_element = subtitle_element.map(|subtitle| under_star(subtitle, props.shows_star));
+    let title_element = title_with_star(title_element, props.star, theme);
+    let subtitle_element = subtitle_element.map(|subtitle| under_star(subtitle, props.star));
 
     // Title row with optional indicator
     let title_row = if has_indicator {

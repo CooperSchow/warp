@@ -17,8 +17,8 @@ use warpui::{
 };
 
 use super::{
-    bulk_close_description, row_shows_star, shows_pin_overlay, star_description,
-    starred_divider_position, PaletteBulkClose,
+    bulk_close_description, header_shows_star, row_star, shows_pin_overlay, star_description,
+    starred_divider_position, PaletteBulkClose, RowStar,
 };
 use crate::appearance::Appearance;
 use crate::features::FeatureFlag;
@@ -48,18 +48,53 @@ fn for_each_flag_state(mut check: impl FnMut(bool, bool)) {
     }
 }
 
-/// A row wears the star exactly when stars are on, its tab is starred and it's
-/// the tab's first row, in every combination.
+/// A starred tab wears one star wherever it's drawn: on its header in the Panes
+/// layout when the panel draws one, and otherwise on its first row. Its rows
+/// are indented alike, so their titles line up: all past the star's slot when
+/// its first row wears the star, and none when its header does. Unstarred
+/// tabs, and every tab with stars off, wear nothing. Over every flag state,
+/// starred or not, header drawn or not, and one to three rows.
 #[test]
-fn a_row_wears_the_star_exactly_on_the_first_row_of_a_starred_tab() {
+fn a_starred_tab_wears_one_star_and_its_rows_line_up() {
     for_each_flag_state(|pins, stars| {
+        let stars_on = pins && stars;
         for starred in [false, true] {
-            for first_row in [false, true] {
+            for header_drawn in [false, true] {
+                let context =
+                    format!("pins {pins}, stars {stars}, starred {starred}, header {header_drawn}");
+                let header_wears_star = header_shows_star(starred, header_drawn);
                 assert_eq!(
-                    row_shows_star(starred, first_row),
-                    pins && stars && starred && first_row,
-                    "pins {pins}, stars {stars}, starred {starred}, first row {first_row}"
+                    header_wears_star,
+                    stars_on && starred && header_drawn,
+                    "{context}"
                 );
+                for row_count in 1..=3usize {
+                    let rows: Vec<RowStar> = (0..row_count)
+                        .map(|row| row_star(starred, row == 0, header_wears_star))
+                        .collect();
+                    let stars_worn = usize::from(header_wears_star)
+                        + rows.iter().filter(|row| **row == RowStar::Star).count();
+                    assert_eq!(
+                        stars_worn,
+                        usize::from(stars_on && starred),
+                        "{context}, {row_count} rows: {rows:?}"
+                    );
+                    assert!(
+                        rows.iter().skip(1).all(|row| *row != RowStar::Star),
+                        "{context}: only the first row can wear it: {rows:?}"
+                    );
+                    assert!(
+                        rows.iter()
+                            .all(|row| row.is_indented() == rows[0].is_indented()),
+                        "{context}: the rows line up: {rows:?}"
+                    );
+                    if header_wears_star || !(stars_on && starred) {
+                        assert!(
+                            rows.iter().all(|row| *row == RowStar::None),
+                            "{context}: no row wears or makes room for a star: {rows:?}"
+                        );
+                    }
+                }
             }
         }
     });
@@ -279,28 +314,61 @@ fn cached_icon(path: &'static str, size: i32, ctx: &AppContext) -> Arc<StaticIma
 /// What one paint of a workspace's window drew for the tab marks.
 #[derive(Debug, PartialEq)]
 struct PaintedMarks {
-    /// Per tab, the stars painted inside its row.
+    /// Per tab, the stars painted inside its row at a row title's size.
     stars: Vec<usize>,
+    /// Per tab, the stars painted inside its block at a Panes header's size.
+    header_stars: Vec<usize>,
     /// Per tab, upstream's pins painted inside its row.
     pins: Vec<usize>,
     /// Per hairline painted in the vertical tabs panel, the index of the first
     /// tab whose row lies wholly below it.
     hairlines: Vec<usize>,
+    /// How many lines the vertical tabs panel draws where the starred block
+    /// ends, between the last starred tab's row and the first other one: the
+    /// hairline, and any border along either row's facing edge. `None` when
+    /// the panel isn't showing or the block doesn't end between two tabs.
+    lines_closing_the_block: Option<usize>,
     /// Per tab group, in `groups` order, the stars painted inside its block.
     group_stars: Vec<usize>,
+}
+
+/// The bitmap the image cache holds for the bundled `path` at `size` points,
+/// once something has painted it; `None` if nothing has.
+fn painted_icon(path: &'static str, size: i32, ctx: &AppContext) -> Option<Arc<StaticImage>> {
+    let state = ImageCache::as_ref(ctx).image(
+        AssetSource::Bundled { path },
+        vec2i(size, size),
+        FitType::Contain,
+        AnimatedImageBehavior::FullAnimation,
+        CacheOption::BySize,
+        None,
+        AssetCache::as_ref(ctx),
+    );
+    let AssetState::Loaded { data } = state else {
+        return None;
+    };
+    match data.as_ref() {
+        Image::Static(image) => Some(image.clone()),
+        _ => None,
+    }
 }
 
 /// Paints the workspace's whole window, every view in it, and reads back where
 /// the stars, pins and hairlines landed.
 fn paint_marks(app: &mut App, workspace: &ViewHandle<Workspace>) -> PaintedMarks {
-    let (window_id, tab_count, groups) = workspace.read(app, |workspace, _| {
+    let (window_id, tab_count, starred_boundary, groups) = workspace.read(app, |workspace, _| {
         let mut groups: Vec<_> = workspace
             .tabs
             .iter()
             .filter_map(|tab| tab.group_id)
             .collect();
         groups.dedup();
-        (workspace.window_id, workspace.tabs.len(), groups)
+        (
+            workspace.window_id,
+            workspace.tabs.len(),
+            workspace.starred_boundary(),
+            groups,
+        )
     });
     app.update(|ctx| {
         let mut presenter = Presenter::new(window_id);
@@ -333,12 +401,21 @@ fn paint_marks(app: &mut App, workspace: &ViewHandle<Workspace>) -> PaintedMarks
                 .filter(|icon| Arc::ptr_eq(&icon.asset, image) && bounds.contains_rect(icon.bounds))
                 .count()
         };
+        let header_star = painted_icon(
+            "bundled/svg/star-filled.svg",
+            super::HEADER_STAR_SIZE as i32,
+            ctx,
+        );
         let theme = Appearance::as_ref(ctx).theme();
         let hairline_inks = [
             internal_colors::fg_overlay_1(theme).into_solid(),
             internal_colors::fg_overlay_2(theme).into_solid(),
         ];
-        let hairlines = match positions.get_position(VERTICAL_TABS_PANEL_POSITION_ID) {
+        let is_hairline_ink = |fill: &ElementFill| {
+            matches!(fill, ElementFill::Solid(ink) if hairline_inks.contains(ink))
+        };
+        let panel = positions.get_position(VERTICAL_TABS_PANEL_POSITION_ID);
+        let hairlines = match panel {
             None => vec![],
             Some(panel) => scene
                 .layers()
@@ -346,10 +423,7 @@ fn paint_marks(app: &mut App, workspace: &ViewHandle<Workspace>) -> PaintedMarks
                 .filter(|rect| {
                     rect.bounds.height() == 1.
                         && panel.contains_rect(rect.bounds)
-                        && matches!(
-                            rect.background,
-                            ElementFill::Solid(ink) if hairline_inks.contains(&ink)
-                        )
+                        && is_hairline_ink(&rect.background)
                 })
                 .map(|rect| {
                     rows.iter()
@@ -358,10 +432,46 @@ fn paint_marks(app: &mut App, workspace: &ViewHandle<Workspace>) -> PaintedMarks
                 })
                 .collect(),
         };
+        let lines_closing_the_block = panel
+            .filter(|_| starred_boundary > 0 && starred_boundary < tab_count)
+            .map(|panel| {
+                let (above, below) = (rows[starred_boundary - 1], rows[starred_boundary]);
+                let at_the_edge = |y: f32| y >= above.max_y() - 1.5 && y <= below.min_y() + 1.5;
+                scene
+                    .layers()
+                    .flat_map(|layer| &layer.rects)
+                    .filter(|rect| panel.contains_rect(rect.bounds))
+                    .map(|rect| {
+                        let own_line = rect.bounds.height() == 1.
+                            && is_hairline_ink(&rect.background)
+                            && at_the_edge(rect.bounds.min_y());
+                        let border = &rect.border;
+                        let border_line = border.width == 1. && is_hairline_ink(&border.color);
+                        usize::from(own_line)
+                            + usize::from(
+                                border_line && border.top && at_the_edge(rect.bounds.min_y()),
+                            )
+                            + usize::from(
+                                border_line
+                                    && border.bottom
+                                    && at_the_edge(rect.bounds.max_y() - 1.),
+                            )
+                    })
+                    .sum()
+            });
         PaintedMarks {
             stars: rows.iter().map(|row| icons_inside(&star, *row)).collect(),
+            header_stars: rows
+                .iter()
+                .map(|row| {
+                    header_star
+                        .as_ref()
+                        .map_or(0, |image| icons_inside(image, *row))
+                })
+                .collect(),
             pins: rows.iter().map(|row| icons_inside(&pin, *row)).collect(),
             hairlines,
+            lines_closing_the_block,
             group_stars: groups
                 .iter()
                 .map(|group_id| {
@@ -421,12 +531,22 @@ fn stars_and_the_hairline_paint_where_they_belong() {
         let workspace = workspace_with_two_starred_tabs(&mut app);
         for layout in LAYOUTS {
             use_layout(&mut app, &workspace, layout);
+            // In the Panes layout the split tab's header, its own label, wears
+            // its star; the other starred tab, one pane with no header, wears
+            // it on its row.
+            let (stars, header_stars) = if layout.rows_per_pane() {
+                (vec![0, 1, 0, 0], vec![1, 0, 0, 0])
+            } else {
+                (vec![1, 1, 0, 0], vec![0; 4])
+            };
             assert_eq!(
                 paint_marks(&mut app, &workspace),
                 PaintedMarks {
-                    stars: vec![1, 1, 0, 0],
+                    stars,
+                    header_stars,
                     pins: vec![0; 4],
                     hairlines: if layout.vertical { vec![2] } else { vec![] },
+                    lines_closing_the_block: layout.vertical.then_some(1),
                     group_stars: vec![],
                 },
                 "{}",
@@ -442,7 +562,13 @@ fn stars_and_the_hairline_paint_where_they_belong() {
         for layout in LAYOUTS {
             use_layout(&mut app, &workspace, layout);
             let painted = paint_marks(&mut app, &workspace);
-            assert_eq!(painted.stars, vec![1; 4], "{}", layout.name);
+            let worn: Vec<usize> = painted
+                .stars
+                .iter()
+                .zip(&painted.header_stars)
+                .map(|(on_rows, on_header)| on_rows + on_header)
+                .collect();
+            assert_eq!(worn, vec![1; 4], "{}: {painted:?}", layout.name);
             assert_eq!(painted.hairlines, Vec::<usize>::new(), "{}", layout.name);
         }
 
@@ -499,8 +625,10 @@ fn with_stars_off_pinned_tabs_paint_as_upstream_does() {
                 paint_marks(&mut app, &workspace),
                 PaintedMarks {
                     stars: vec![0; 4],
+                    header_stars: vec![0; 4],
                     pins: vec![split_tab_pins, 1, 0, 0],
                     hairlines: vec![],
+                    lines_closing_the_block: None,
                     group_stars: vec![],
                 },
                 "{}",
