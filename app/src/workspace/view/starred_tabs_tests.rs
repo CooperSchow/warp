@@ -10,6 +10,7 @@ use warpui::elements::Fill as ElementFill;
 use warpui::image_cache::{
     AnimatedImageBehavior, CacheOption, FitType, Image, ImageCache, StaticImage,
 };
+use warpui::platform::WindowStyle;
 use warpui::{
     App, AppContext, EntityId, Presenter, SingletonEntity as _, TypedActionView as _, ViewHandle,
     WindowInvalidation,
@@ -23,6 +24,7 @@ use crate::appearance::Appearance;
 use crate::features::FeatureFlag;
 use crate::menu::MenuItem;
 use crate::pane_group::Direction;
+use crate::root_view::NewWorkspaceSource;
 use crate::tab::tab_position_id;
 use crate::undo_close::UndoCloseStack;
 use crate::workspace::tab_settings::{
@@ -32,6 +34,7 @@ use crate::workspace::view::tests::{initialize_app, mock_workspace};
 use crate::workspace::view::vertical_tabs::vtab_group_position_id;
 use crate::workspace::view::VERTICAL_TABS_PANEL_POSITION_ID;
 use crate::workspace::{Workspace, WorkspaceAction};
+use crate::GlobalResourceHandles;
 
 /// Runs `check` under each combination of the two flags stars need, passing
 /// `PinnedTabs` and `StarredTabs` in.
@@ -482,6 +485,138 @@ fn workspace_with_tabs(app: &mut App, count: usize) -> ViewHandle<Workspace> {
         }
     });
     workspace
+}
+
+/// Moves the tab at `index` from `source` into `target`'s window, dropped on
+/// `slot`, the way a cross-window drag's handoff does. Returns the moved tab's
+/// pane group and the index it landed at.
+fn move_tab_to_other_window(
+    app: &mut App,
+    source: &ViewHandle<Workspace>,
+    index: usize,
+    target: &ViewHandle<Workspace>,
+    slot: usize,
+) -> (EntityId, usize) {
+    let transferred = source
+        .read(app, |workspace, ctx| workspace.get_tab_transfer_info(index, ctx))
+        .expect("the source keeps another tab");
+    let pane_group_id = transferred.pane_group.id();
+    source.update(app, |workspace, ctx| {
+        workspace.prepare_for_transferred_tab_attach(&transferred.pane_group, ctx);
+    });
+    let (from, to) = app.read(|ctx| (source.window_id(ctx), target.window_id(ctx)));
+    app.update(|ctx| {
+        ctx.transfer_view_tree_to_window(pane_group_id, from, to);
+    });
+    let landed = target.update(app, |workspace, ctx| {
+        workspace.insert_transferred_tab_at_index(transferred, slot, ctx)
+    });
+    source.update(app, |workspace, ctx| {
+        workspace.remove_tab_without_undo(index, ctx);
+        workspace.set_suppress_detach_panes_on_window_close(false);
+    });
+    (pane_group_id, landed)
+}
+
+/// A starred tab moved to another window keeps its star and lands at the end
+/// of that window's starred block, whatever slot it's dropped on; an unstarred
+/// one lands on its slot. With stars off, upstream's result: the pin stays
+/// behind, and every tab lands on its slot, pushed past the pinned block.
+#[test]
+fn a_starred_tab_moved_to_another_window_keeps_its_star() {
+    for stars in [true, false] {
+        let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
+        let _stars = FeatureFlag::StarredTabs.override_enabled(stars);
+        App::test((), |mut app| async move {
+            initialize_app(&mut app);
+            // The source leads with two starred tabs, the target with one.
+            let source = workspace_with_tabs(&mut app, 4);
+            let target = workspace_with_tabs(&mut app, 3);
+            source.update(&mut app, |workspace, ctx| {
+                workspace.pin_tab(0, ctx);
+                workspace.pin_tab(1, ctx);
+            });
+            target.update(&mut app, |workspace, ctx| workspace.pin_tab(0, ctx));
+
+            // Each move takes the source's first tab: (starred, drop slot,
+            // where it lands and how long the target's starred block is then,
+            // with stars on and with them off).
+            for (starred, slot, with_stars, without_stars) in [
+                (true, 3, (1, 2), (3, 1)),
+                (true, 0, (2, 3), (1, 1)),
+                (false, 5, (5, 3), (5, 1)),
+            ] {
+                let case = format!("stars {stars}, starred {starred}, slot {slot}");
+                let (expected_landing, block) = if stars { with_stars } else { without_stars };
+                let (moved, landed) = move_tab_to_other_window(&mut app, &source, 0, &target, slot);
+                target.read(&app, |workspace, _| {
+                    assert_eq!(landed, expected_landing, "{case}");
+                    assert_eq!(workspace.tabs[landed].pane_group.id(), moved, "{case}");
+                    assert_eq!(workspace.active_tab_index, landed, "{case}");
+                    assert_eq!(workspace.tabs[landed].pinned, stars && starred, "{case}");
+                    assert_eq!(
+                        workspace.pinned_boundary_index(&workspace.tabs),
+                        block,
+                        "{case}"
+                    );
+                    assert!(
+                        workspace.tabs[block..].iter().all(|tab| !tab.pinned),
+                        "{case}: the starred tabs stay one block at the top"
+                    );
+                });
+            }
+        });
+    }
+}
+
+/// Moved into a window of its own, a starred tab keeps its star with stars on,
+/// and arrives unpinned with them off, as upstream's does.
+#[test]
+fn a_starred_tab_moved_to_a_new_window_keeps_its_star() {
+    for stars in [true, false] {
+        let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
+        let _stars = FeatureFlag::StarredTabs.override_enabled(stars);
+        App::test((), |mut app| async move {
+            initialize_app(&mut app);
+            let source = workspace_with_tabs(&mut app, 2);
+            source.update(&mut app, |workspace, ctx| workspace.pin_tab(1, ctx));
+            for (index, starred) in [(0, true), (1, false)] {
+                let transferred = source
+                    .read(&app, |workspace, ctx| {
+                        workspace.get_tab_transfer_info(index, ctx)
+                    })
+                    .expect("the source has two tabs");
+                assert_eq!(transferred.pinned, starred, "the snapshot carries the star");
+
+                let global_resource_handles = GlobalResourceHandles::mock(&mut app);
+                let (_, window) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
+                    Workspace::new(
+                        global_resource_handles,
+                        None,
+                        NewWorkspaceSource::TransferredTab {
+                            tab_color: None,
+                            custom_title: None,
+                            left_panel_open: false,
+                            vertical_tabs_panel_open: false,
+                            right_panel_open: false,
+                            is_right_panel_maximized: false,
+                            is_tab_drag_preview: false,
+                            pinned: transferred.pinned,
+                        },
+                        ctx,
+                    )
+                });
+                window.read(&app, |workspace, _| {
+                    assert_eq!(workspace.tabs.len(), 1);
+                    assert_eq!(
+                        workspace.tabs[0].pinned,
+                        stars && starred,
+                        "stars {stars}, starred {starred}"
+                    );
+                });
+            }
+        });
+    }
 }
 
 fn star(pane_group_id: EntityId, starred: bool) -> WorkspaceAction {

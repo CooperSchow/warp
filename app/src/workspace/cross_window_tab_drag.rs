@@ -484,6 +484,19 @@ impl CrossWindowTabDrag {
         })
     }
 
+    /// Records the index a handed-off tab actually landed at in its target.
+    /// A starred tab lands at the end of the starred block rather than on its
+    /// drop slot, and the rest of the drag must act on that tab and no other.
+    pub(crate) fn record_inserted_index(&mut self, index: usize) {
+        if let Some(DragPhase::InsertedInTarget {
+            target_insertion_index,
+            ..
+        }) = self.active_drag.as_mut().map(|drag| &mut drag.phase)
+        {
+            *target_insertion_index = index;
+        }
+    }
+
     /// Returns rendering data for the ghost visual in `window_id`'s tab bar,
     /// or `None` if no ghost is active for that window.
     ///
@@ -1551,9 +1564,14 @@ impl CrossWindowTabDrag {
         let pane_group_id = transferred_tab.pane_group.id();
         ctx.transfer_view_tree_to_window(pane_group_id, caller_window_id, target.window_id);
 
-        target_workspace.update(ctx, move |workspace, ctx| {
-            workspace.insert_transferred_tab_at_index(transferred_tab, target.insertion_index, ctx);
+        let inserted_index = target_workspace.update(ctx, move |workspace, ctx| {
+            let index = workspace.insert_transferred_tab_at_index(
+                transferred_tab,
+                target.insertion_index,
+                ctx,
+            );
             workspace.current_workspace_state.is_tab_being_dragged = true;
+            index
         });
 
         ctx.windows().hide_window(caller_window_id);
@@ -1564,9 +1582,10 @@ impl CrossWindowTabDrag {
             });
         }
 
+        // Where the tab landed, which for a starred tab isn't its drop slot.
         drag.phase = DragPhase::InsertedInTarget {
             target_window_id: target.window_id,
-            target_insertion_index: target.insertion_index,
+            target_insertion_index: inserted_index,
         };
     }
 
@@ -1704,9 +1723,14 @@ impl CrossWindowTabDrag {
         ctx.transfer_view_tree_to_window(pane_group_id, preview_window_id, target.window_id);
 
         let target_insertion_index = target.insertion_index;
-        target_workspace.update(ctx, move |workspace, ctx| {
-            workspace.insert_transferred_tab_at_index(transferred_tab, target_insertion_index, ctx);
+        let inserted_index = target_workspace.update(ctx, move |workspace, ctx| {
+            let index = workspace.insert_transferred_tab_at_index(
+                transferred_tab,
+                target_insertion_index,
+                ctx,
+            );
             workspace.current_workspace_state.is_tab_being_dragged = true;
+            index
         });
 
         ctx.windows().hide_window(preview_window_id);
@@ -1717,9 +1741,10 @@ impl CrossWindowTabDrag {
             });
         }
 
+        // Where the tab landed, which for a starred tab isn't its drop slot.
         drag.phase = DragPhase::InsertedInTarget {
             target_window_id: target.window_id,
-            target_insertion_index: target.insertion_index,
+            target_insertion_index: inserted_index,
         };
         log::info!(
             "tab_drag: execute_handoff_multi_tab_to_other -> InsertedInTarget target_wid={} insertion_index={}",

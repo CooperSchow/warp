@@ -986,6 +986,9 @@ pub struct TransferredTab {
     pub right_panel_open: bool,
     pub is_right_panel_maximized: bool,
     pub draggable_state: DraggableState,
+    /// Whether the tab is starred. With stars on, it keeps its star wherever
+    /// it goes; with them off it arrives unpinned, as upstream's tab does.
+    pub pinned: bool,
 }
 #[cfg(not(target_family = "wasm"))]
 struct ThirdPartyLocalContinuationLaunch {
@@ -4254,6 +4257,7 @@ impl Workspace {
                 right_panel_open,
                 is_right_panel_maximized,
                 is_tab_drag_preview,
+                pinned,
                 ..
             } => {
                 self.set_is_tab_drag_preview(is_tab_drag_preview);
@@ -4266,6 +4270,7 @@ impl Workspace {
                 if let (Some(color), Some(tab)) = (tab_color, self.tabs.last_mut()) {
                     tab.selected_color = SelectedTabColor::Color(color);
                 }
+                self.keep_transferred_star(pinned);
                 if self.left_panel_visibility_across_tabs_enabled(ctx) {
                     self.left_panel_open = left_panel_open;
                 }
@@ -4283,6 +4288,7 @@ impl Workspace {
                 custom_title,
                 left_panel_open,
                 is_tab_drag_preview,
+                pinned,
                 ..
             } => {
                 self.set_is_tab_drag_preview(is_tab_drag_preview);
@@ -4295,6 +4301,7 @@ impl Workspace {
                 if let (Some(color), Some(tab)) = (tab_color, self.tabs.last_mut()) {
                     tab.selected_color = SelectedTabColor::Color(color);
                 }
+                self.keep_transferred_star(pinned);
                 if self.left_panel_visibility_across_tabs_enabled(ctx) {
                     self.left_panel_open = left_panel_open;
                 }
@@ -28107,6 +28114,7 @@ impl Workspace {
         let right_panel_open = pane_group.read(ctx, |pg, _| pg.right_panel_open);
         let is_right_panel_maximized = pane_group.read(ctx, |pg, _| pg.is_right_panel_maximized);
         let vertical_tabs_panel_open = self.vertical_tabs_panel_open;
+        let pinned = tab.pinned;
 
         Some(TransferredTab {
             pane_group,
@@ -28117,6 +28125,7 @@ impl Workspace {
             is_right_panel_maximized,
             draggable_state,
             vertical_tabs_panel_open,
+            pinned,
         })
     }
 
@@ -28158,34 +28167,59 @@ impl Workspace {
             .close_window(ctx.window_id(), TerminationMode::ContentTransferred);
     }
 
+    /// Inserts a tab moved in from another window, activates it, and returns
+    /// the index it landed at. With stars on, a starred tab keeps its star and
+    /// lands at the end of the starred block, whatever slot it was dropped on.
+    /// Any other tab lands on its slot, pushed past the starred block and out
+    /// of the middle of a group.
     pub(crate) fn insert_transferred_tab_at_index(
         &mut self,
         transferred_tab: TransferredTab,
         insertion_index: usize,
         ctx: &mut ViewContext<Self>,
-    ) {
+    ) -> usize {
         let TransferredTab {
             pane_group,
             color,
             draggable_state,
+            pinned,
             ..
         } = transferred_tab;
         ctx.subscribe_to_view(&pane_group, move |me, pane_group, event, ctx| {
             me.handle_file_tree_event(pane_group, event, ctx)
         });
 
-        let index = insertion_index.min(self.tabs.len());
-        // Safety net to ensure the tab lands after all pinned items.
-        let index = self.clamp_to_unpinned_region(&self.tabs, index);
-        // Never split a group: a drop that resolves to the middle of a group's
-        // run is pushed past the group's last member instead.
-        let index = self.clamp_past_group(index);
+        let starred = pinned && starred_tabs::starred_tabs_enabled();
+        let index = if starred {
+            // The end of the starred block, which no group straddles.
+            self.pinned_boundary_index(&self.tabs)
+        } else {
+            let index = insertion_index.min(self.tabs.len());
+            // Safety net to ensure the tab lands after all pinned items.
+            let index = self.clamp_to_unpinned_region(&self.tabs, index);
+            // Never split a group: a drop that resolves to the middle of a group's
+            // run is pushed past the group's last member instead.
+            self.clamp_past_group(index)
+        };
         let mut tab_data = TabData::new(pane_group);
         tab_data.selected_color = color.map_or(SelectedTabColor::Unset, SelectedTabColor::Color);
         tab_data.draggable_state = draggable_state;
+        tab_data.pinned = starred;
         self.tabs.insert(index, tab_data);
         self.activate_tab_internal(index, ctx);
         ctx.notify();
+        index
+    }
+
+    /// Stars the tab a new window was opened for, when the tab it was moved
+    /// from was starred and stars are on. It's the window's only tab, and so
+    /// the whole of its starred block.
+    fn keep_transferred_star(&mut self, pinned: bool) {
+        if pinned && starred_tabs::starred_tabs_enabled() {
+            if let Some(tab) = self.tabs.last_mut() {
+                tab.pinned = true;
+            }
+        }
     }
 
     /// If an insertion at `index` would land strictly inside a group's
@@ -28544,11 +28578,14 @@ impl Workspace {
                 CrossWindowTabDrag::handle(ctx).update(ctx, |drag, _| {
                     drag.mark_source_placeholder_consumed();
                 });
-                self.insert_transferred_tab_at_index(
+                let inserted_index = self.insert_transferred_tab_at_index(
                     info.transferred_tab,
                     info.insertion_index,
                     ctx,
                 );
+                CrossWindowTabDrag::handle(ctx).update(ctx, |drag, _| {
+                    drag.record_inserted_index(inserted_index);
+                });
                 self.current_workspace_state.is_tab_being_dragged = true;
                 self.focus_active_tab(ctx);
             }

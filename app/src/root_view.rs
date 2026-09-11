@@ -631,6 +631,7 @@ pub fn create_transferred_window(
                     right_panel_open: transferred_tab.right_panel_open,
                     is_right_panel_maximized: transferred_tab.is_right_panel_maximized,
                     is_tab_drag_preview,
+                    pinned: transferred_tab.pinned,
                 },
                 ctx,
             );
@@ -1553,6 +1554,9 @@ pub enum NewWorkspaceSource {
         is_right_panel_maximized: bool,
         /// Whether this transferred tab window is currently being used as a drag preview.
         is_tab_drag_preview: bool,
+        /// Whether the source tab was starred. With stars on, the new window's
+        /// tab keeps its star.
+        pinned: bool,
     },
 }
 
