@@ -43,9 +43,9 @@ use crate::appearance::Appearance;
 use crate::code::active_file::{ActiveFileEvent, ActiveFileModel};
 use crate::code::buffer_location::LocalOrRemotePath;
 use crate::code::file_tree::delete_confirmation_dialog::{
-    self, changed_since_request_message, delete_failed_message, no_longer_exists_message,
-    DeleteFileConfirmationDialog, DeleteFileConfirmationEvent, ItemIdentity, ItemKind,
-    PendingDelete, STALE_MENU_MESSAGE,
+    self, changed_since_request_message, delete_failed_message, folder_partly_deleted_message,
+    no_longer_exists_message, DeleteFileConfirmationDialog, DeleteFileConfirmationEvent,
+    ItemIdentity, ItemKind, PendingDelete, STALE_MENU_MESSAGE,
 };
 use crate::coding_panel_enablement_state::CodingPanelEnablementState;
 use crate::editor::{EditorOptions, EditorView, TextOptions};
@@ -280,6 +280,9 @@ pub struct FileTreeView {
     /// Paths with a delete running in the background. A second request for one of them is
     /// ignored until the first finishes.
     deletes_in_flight: HashSet<StandardizedPath>,
+    /// The roots the file tree displayed when the delete dialog opened. The dialog closes if they
+    /// change while it's open.
+    pending_delete_roots: Vec<StandardizedPath>,
     /// Unique ID used to position this view.
     position_id: String,
     /// The pending edit, if any
@@ -650,6 +653,7 @@ impl FileTreeView {
             | RepoMetadataEvent::UpdatingRepositoryFailed { .. }
             | RepoMetadataEvent::IncrementalUpdateReady { .. } => {}
         }
+        self.close_delete_dialog_if_stale(ctx);
     }
 
     #[cfg(feature = "local_fs")]
@@ -746,6 +750,7 @@ impl FileTreeView {
             delete_dialog,
             pending_delete: None,
             deletes_in_flight: HashSet::new(),
+            pending_delete_roots: Vec::new(),
             position_id: format!("file_tree_{}", ctx.view_id()),
             pending_edit: None,
             editor_view,
@@ -936,6 +941,7 @@ impl FileTreeView {
             return;
         }
         self.enablement = enablement;
+        self.close_delete_dialog_if_stale(ctx);
         ctx.notify();
     }
 
@@ -1008,6 +1014,7 @@ impl FileTreeView {
             self.rebuild_flattened_items();
             ctx.notify();
         }
+        self.close_delete_dialog_if_stale(ctx);
     }
 
     /// Sets the root directories to display in the file tree.
@@ -1208,6 +1215,7 @@ impl FileTreeView {
             }
         }
         self.apply_pending_focus_target();
+        self.close_delete_dialog_if_stale(ctx);
     }
 
     /// Attempts to select `pending_focus_target` if it is currently
@@ -2440,10 +2448,13 @@ impl FileTreeView {
                     .into_item(),
             );
 
-            // For now, the root repo is always the zero index. This may not always be the case if we allow
-            // multiple repos in a project view, for instance. This disallows deletion/renaming of the root repo.
-            let is_repo_root_dir = id.index == 0;
-            if !is_repo_root_dir {
+            // No displayed root, and no folder holding one, can be renamed or deleted from the
+            // tree: either would pull the ground out from under the tree itself. This goes by
+            // path, since a root that sits inside another root's list isn't at row 0 there. The
+            // "New file" row whose name is still being typed isn't on disk yet, so it can't be
+            // either; a real file that happens to have the placeholder's name would be the one
+            // to go.
+            if !self.holds_a_root(item.path()) && !self.is_new_file_placeholder(id) {
                 items.push(
                     MenuItemFields::new("Rename")
                         .with_on_select_action(FileTreeAction::Rename { id: id.clone() })
@@ -2613,14 +2624,18 @@ impl FileTreeView {
         path: &StandardizedPath,
         ctx: &mut ViewContext<Self>,
     ) {
-        // The root item never offers Delete (see `context_menu_items`).
-        if id.index == 0 {
+        // Neither is offered Delete… (see `context_menu_items`). Refuse here too, so no route
+        // can delete a displayed root, a folder holding one, or the "New file" placeholder.
+        if self.holds_a_root(path) || self.is_new_file_placeholder(id) {
+            log::warn!("Not deleting {path}: it's a root, holds one, or isn't on disk yet");
             return;
         }
-        let Some(root_dir) = self.root_directories.get(&id.root) else {
-            return;
-        };
-        if root_dir.items.get(id.index).map(FileTreeItem::path) != Some(path) {
+        let row_holds_path = self
+            .root_directories
+            .get(&id.root)
+            .and_then(|root_dir| root_dir.items.get(id.index))
+            .is_some_and(|item| item.path() == path);
+        if !row_holds_path {
             log::warn!("Not deleting {path}: the file tree changed after its menu opened");
             Self::show_delete_toast(path, STALE_MENU_MESSAGE.to_owned(), ctx);
             return;
@@ -2638,19 +2653,25 @@ impl FileTreeView {
         // deleted as a link, never as the folder it points to.
         let metadata = match std::fs::symlink_metadata(&local_path) {
             Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                // Something else removed it. Say so, and stop showing it.
+                self.forget_paths(std::slice::from_ref(path));
+                ctx.notify();
+                Self::show_delete_toast(path, no_longer_exists_message(&display_name), ctx);
+                return;
+            }
             Err(error) => {
-                let message = if error.kind() == io::ErrorKind::NotFound {
-                    no_longer_exists_message(&display_name)
-                } else {
-                    delete_failed_message(&display_name, &error)
-                };
+                let message = delete_failed_message(&display_name, &error);
                 Self::show_delete_toast(path, message, ctx);
                 return;
             }
         };
         let kind = ItemKind::from_file_type(metadata.file_type());
         let child_count = match kind {
-            ItemKind::Directory => loaded_child_count(&root_dir.entry, path),
+            ItemKind::Directory => self
+                .root_directories
+                .get(&id.root)
+                .and_then(|root_dir| loaded_child_count(&root_dir.entry, path)),
             ItemKind::File | ItemKind::Symlink => None,
         };
 
@@ -2666,8 +2687,25 @@ impl FileTreeView {
             dialog.set_target(target.clone(), ctx);
         });
         self.pending_delete = Some(target);
+        self.pending_delete_roots = self.displayed_directories.clone();
         ctx.focus(&self.delete_dialog);
         ctx.notify();
+    }
+
+    /// Whether `path` is a displayed root, or a folder with one inside it. This compares paths,
+    /// not rows: a root that sits inside another root's list isn't at row 0 there.
+    fn holds_a_root(&self, path: &StandardizedPath) -> bool {
+        self.root_directories
+            .keys()
+            .any(|root| root.starts_with(path))
+    }
+
+    /// Whether `id` is the row "New file" adds while the new file's name is being typed. Nothing
+    /// is on disk for it yet.
+    fn is_new_file_placeholder(&self, id: &FileTreeIdentifier) -> bool {
+        self.pending_edit
+            .as_ref()
+            .is_some_and(|edit| edit.kind == PendingEditKind::CreateNewFile && edit.id == *id)
     }
 
     fn handle_delete_dialog_event(
@@ -2675,37 +2713,98 @@ impl FileTreeView {
         event: &DeleteFileConfirmationEvent,
         ctx: &mut ViewContext<Self>,
     ) {
-        let target = match event {
-            DeleteFileConfirmationEvent::Confirm => self.pending_delete.take(),
-            DeleteFileConfirmationEvent::Cancel => None,
-        };
-        self.close_delete_dialog(ctx);
-        // Either way, the file tree takes focus back so arrow-key navigation keeps working.
-        ctx.focus_self();
-        if let Some(target) = target {
-            self.perform_delete(target, ctx);
+        match event {
+            DeleteFileConfirmationEvent::Confirm => {
+                // The dialog closes as soon as the tree stops showing its list or its roots
+                // change, so it shouldn't be confirmed in either state. If it is, nothing is
+                // deleted.
+                let target = self
+                    .pending_delete
+                    .clone()
+                    .filter(|_| self.delete_dialog_fits_the_tree());
+                self.close_delete_dialog(ctx);
+                // The file tree takes focus back so arrow-key navigation keeps working.
+                ctx.focus_self();
+                if let Some(target) = target {
+                    self.perform_delete(target, ctx);
+                }
+            }
+            DeleteFileConfirmationEvent::Cancel => {
+                self.close_delete_dialog(ctx);
+                ctx.focus_self();
+            }
+            DeleteFileConfirmationEvent::FocusLost => {
+                // Focus went somewhere else, so leave it there.
+                if self.pending_delete.is_some() {
+                    self.close_delete_dialog(ctx);
+                }
+            }
         }
     }
 
     /// Hides the delete dialog and forgets what it was asking about.
     fn close_delete_dialog(&mut self, ctx: &mut ViewContext<Self>) {
         self.pending_delete = None;
+        self.pending_delete_roots.clear();
         self.delete_dialog
             .update(ctx, |dialog, ctx| dialog.clear_target(ctx));
         ctx.notify();
     }
 
+    /// Whether the open delete dialog still fits what the file tree shows: the tree is showing
+    /// its list, not a loading or error message in its place, and displays the same roots as
+    /// when the dialog opened.
+    fn delete_dialog_fits_the_tree(&self) -> bool {
+        self.shows_list()
+            && self.displayed_directories.len() == self.pending_delete_roots.len()
+            && self
+                .displayed_directories
+                .iter()
+                .all(|root| self.pending_delete_roots.contains(root))
+    }
+
+    /// Closes the delete dialog, deleting nothing, once it no longer fits what the file tree
+    /// shows. It runs wherever the tree's state changes in a way that could hide the list or
+    /// change the roots.
+    fn close_delete_dialog_if_stale(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.pending_delete.is_some() && !self.delete_dialog_fits_the_tree() {
+            log::info!("Closing the delete dialog: the file tree changed while it was open");
+            self.close_delete_dialog(ctx);
+        }
+    }
+
     /// Deletes the item the dialog showed, in the background. The removal happens only if the
     /// path still names that item: the same kind, with the same identity, as when the dialog
-    /// opened.
+    /// opened. In a test build, it also happens only inside the temp folder.
     fn perform_delete(&mut self, target: PendingDelete, ctx: &mut ViewContext<Self>) {
+        #[cfg(any(test, feature = "integration_tests"))]
+        if let Some(reason) =
+            delete_confirmation_dialog::test_build_delete_refusal(&target.local_path)
+        {
+            log::error!("A test build refused to delete: {reason}");
+            let message = format!(
+                "A test build refused to delete \"{}\": {reason}",
+                target.display_name
+            );
+            Self::show_delete_toast(&target.std_path, message, ctx);
+            return;
+        }
         if !self.deletes_in_flight.insert(target.std_path.clone()) {
             return;
         }
+        // For a folder, what the tree has loaded of it, so a delete that stops partway can
+        // report which of those items are gone.
+        let loaded_items = match target.kind {
+            ItemKind::Directory => self.folder_and_loaded_contents(&target.std_path),
+            ItemKind::File | ItemKind::Symlink => Vec::new(),
+        };
         let local_path = target.local_path.clone();
         let (kind, identity) = (target.kind, target.identity);
+        // The check and the removal run in this one job, back to back.
         ctx.spawn(
-            delete_if_unchanged(local_path, kind, identity),
+            blocking::unblock(move || {
+                delete_if_unchanged(&local_path, kind, identity, loaded_items)
+            }),
             move |me, outcome, ctx| me.finish_delete(target, outcome, ctx),
         );
     }
@@ -2754,6 +2853,9 @@ impl FileTreeView {
                 Self::show_delete_toast(&target.std_path, message, ctx);
             }
             DeleteOutcome::Missing => {
+                // Something else removed it. Say so, and stop showing it. No `FileDeleted`: an
+                // editor tab open on it keeps whatever it holds.
+                self.forget_paths(std::slice::from_ref(&target.std_path));
                 let message = no_longer_exists_message(&target.display_name);
                 Self::show_delete_toast(&target.std_path, message, ctx);
             }
@@ -2762,17 +2864,77 @@ impl FileTreeView {
                 let message = delete_failed_message(&target.display_name, &error);
                 Self::show_delete_toast(&target.std_path, message, ctx);
             }
+            DeleteOutcome::FolderPartlyDeleted { error, gone } => {
+                log::warn!(
+                    "Deleting {} stopped partway: {error}",
+                    target.local_path.display()
+                );
+                // Stop showing what's gone, and close editor tabs open on it.
+                self.forget_paths(&gone);
+                for path in &gone {
+                    ctx.emit(FileTreeEvent::FileDeleted {
+                        path: path.to_local_path_lossy(),
+                    });
+                }
+                let message = folder_partly_deleted_message(&target.display_name);
+                Self::show_delete_toast(&target.std_path, message, ctx);
+            }
         }
         ctx.notify();
+    }
+
+    /// The folder at `folder` and every item inside it that the tree has loaded, in any local
+    /// root. It reads the in-memory tree only.
+    fn folder_and_loaded_contents(&self, folder: &StandardizedPath) -> Vec<StandardizedPath> {
+        let mut found = vec![folder.clone()];
+        for root_dir in self
+            .root_directories
+            .values()
+            .filter(|root_dir| !root_dir.is_remote())
+        {
+            let mut folders = vec![folder.clone()];
+            while let Some(parent) = folders.pop() {
+                for child in root_dir.entry.child_paths(&parent) {
+                    folders.push((**child).clone());
+                    found.push((**child).clone());
+                }
+            }
+        }
+        // Nested roots can share an item; list it once.
+        found.into_iter().unique().collect()
+    }
+
+    /// Takes `paths`, which are gone from disk, out of the in-memory tree and rebuilds the list,
+    /// rather than wait for the file watcher, which may not be watching them.
+    fn forget_paths(&mut self, paths: &[StandardizedPath]) {
+        if paths.is_empty() {
+            return;
+        }
+        for root_dir in self
+            .root_directories
+            .values_mut()
+            .filter(|root_dir| !root_dir.is_remote())
+        {
+            for path in paths {
+                if root_dir.entry.contains(path) {
+                    root_dir.entry.remove(path);
+                }
+            }
+        }
+        self.rebuild_flattened_items();
     }
 
     /// Shows an error toast about deleting `path`. A newer toast about the same path replaces an
     /// older one.
     fn show_delete_toast(path: &StandardizedPath, message: String, ctx: &mut ViewContext<Self>) {
+        Self::show_error_toast(format!("file_tree_delete:{path}"), message, ctx);
+    }
+
+    /// Shows an error toast. A newer toast with the same `object_id` replaces an older one.
+    fn show_error_toast(object_id: String, message: String, ctx: &mut ViewContext<Self>) {
         let window_id = ctx.window_id();
         ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
-            let toast =
-                DismissibleToast::error(message).with_object_id(format!("file_tree_delete:{path}"));
+            let toast = DismissibleToast::error(message).with_object_id(object_id);
             toast_stack.add_ephemeral_toast(toast, window_id, ctx);
         });
     }
@@ -2895,35 +3057,96 @@ impl FileTreeView {
             );
         }
 
-        if self.pending_delete.is_some() {
-            stack.add_positioned_overlay_child(
-                ChildView::new(&self.delete_dialog).finish(),
-                OffsetPositioning::offset_from_parent(
-                    self.delete_dialog_offset(app),
-                    ParentOffsetBounds::WindowByPosition,
-                    ParentAnchor::Center,
-                    ChildAnchor::Center,
-                ),
-            );
-        }
-
         stack.finish()
     }
 
-    /// Moves the delete dialog from the centre of the file tree, where the stack anchors it, to
-    /// the centre of the window. It uses positions from the last rendered frame; until there is
-    /// one, the dialog stays centred on the file tree.
-    fn delete_dialog_offset(&self, app: &AppContext) -> Vector2F {
-        let Some(window_id) = self.view_handle.window_id(app) else {
-            return Vector2F::zero();
-        };
-        let (Some(window_bounds), Some(file_tree_bounds)) = (
-            app.window_bounds(&window_id),
-            app.element_position_by_id_at_last_frame(window_id, &self.position_id),
-        ) else {
-            return Vector2F::zero();
-        };
-        window_bounds.size() * 0.5 - file_tree_bounds.center()
+    /// What the file tree shows apart from the delete dialog: its list, or a message when there
+    /// is no list to show.
+    #[cfg(feature = "local_fs")]
+    fn render_content(&self, app: &AppContext) -> Box<dyn Element> {
+        if self.shows_list() {
+            return self.render_file_tree(app);
+        }
+
+        if matches!(self.enablement, CodingPanelEnablementState::Disabled) {
+            return self.render_error_state(DISABLED_TEXT.to_string(), app);
+        }
+
+        if matches!(
+            self.enablement,
+            CodingPanelEnablementState::PendingRemoteSession
+        ) {
+            return self.render_loading_state(app);
+        }
+
+        if self.displayed_directories.is_empty() {
+            if let CodingPanelEnablementState::RemoteSession { has_remote_server } = self.enablement
+            {
+                // When the session has a remote server connection (Auto SSH
+                // Warpification / mode 1), show a loading state — the server
+                // may push repo metadata momentarily. For other SSH modes
+                // (tmux, subshell) no data will arrive, so show the disabled
+                // error instead.
+                return if has_remote_server {
+                    self.render_loading_state(app)
+                } else {
+                    self.render_error_state(REMOTE_TEXT.to_string(), app)
+                };
+            }
+
+            if matches!(
+                self.enablement,
+                CodingPanelEnablementState::UnsupportedSession
+            ) {
+                return self.render_error_state(WSL_TEXT.to_string(), app);
+            }
+
+            return self.render_loading_state(app);
+        }
+
+        // Roots are displayed, but none has an item to show yet.
+        self.render_loading_state(app)
+    }
+
+    /// Whether the file tree is showing its list, rather than a loading or error message in its
+    /// place. `render_content` draws the list exactly when this holds, and the delete dialog stays
+    /// open only while it does.
+    #[cfg(feature = "local_fs")]
+    fn shows_list(&self) -> bool {
+        !matches!(
+            self.enablement,
+            CodingPanelEnablementState::Disabled | CodingPanelEnablementState::PendingRemoteSession
+        ) && self.total_item_count() > 0
+    }
+
+    #[cfg(not(feature = "local_fs"))]
+    fn shows_list(&self) -> bool {
+        false
+    }
+
+    /// Draws the delete dialog over `content` while one is open. It's added here, whatever the
+    /// file tree is showing, rather than inside the list. The dialog closes whenever the list
+    /// gives way to a message (see `close_delete_dialog_if_stale`), and should some change ever
+    /// slip past that, the dialog stays in sight rather than pending unseen.
+    fn with_delete_dialog(&self, content: Box<dyn Element>) -> Box<dyn Element> {
+        if self.pending_delete.is_none() {
+            return content;
+        }
+        let mut stack = Stack::new();
+        stack.add_child(content);
+        // The dialog's view takes all the space it's offered, which here is the whole window.
+        // Keeping it inside the window then pins it to the window's top-left corner, wherever
+        // the file tree sits, and the dialog centres its box within that.
+        stack.add_positioned_overlay_child(
+            ChildView::new(&self.delete_dialog).finish(),
+            OffsetPositioning::offset_from_parent(
+                Vector2F::zero(),
+                ParentOffsetBounds::WindowByPosition,
+                ParentAnchor::TopLeft,
+                ChildAnchor::TopLeft,
+            ),
+        );
+        stack.finish()
     }
 
     fn render_error_state(&self, text: String, app: &AppContext) -> Box<dyn Element> {
@@ -3123,17 +3346,31 @@ enum DeleteOutcome {
     /// Nothing exists at the path any more.
     Missing,
     Failed(io::Error),
+    /// A folder's delete stopped partway. `gone` lists what no longer exists of the folder and
+    /// the items the tree had loaded inside it.
+    FolderPartlyDeleted {
+        error: io::Error,
+        gone: Vec<StandardizedPath>,
+    },
 }
 
-/// Deletes the item at `path` if it is still the item the dialog showed. This runs off the main
-/// thread, and the check happens immediately before the removal to keep the gap between them as
-/// short as possible.
-async fn delete_if_unchanged(
-    path: PathBuf,
+/// Deletes the item at `path` if it is still the item the dialog showed. It runs on a thread
+/// from the blocking pool, off the main thread, and makes the check and the removal back to back
+/// there, so the gap between them is a couple of system calls rather than a trip through the
+/// executor. The gap can't be closed entirely, because no portable call removes a path only if
+/// it still names a given item. The removal never follows a symbolic link, so a link swapped in
+/// during the gap is removed as a link; a real folder swapped in would still be removed.
+///
+/// For a folder, `loaded_items` is the folder and what the tree has loaded inside it. If the
+/// folder's delete stops partway, they're checked with `lstat` in this same job, to report which
+/// are gone.
+fn delete_if_unchanged(
+    path: &Path,
     kind: ItemKind,
     identity: ItemIdentity,
+    loaded_items: Vec<StandardizedPath>,
 ) -> DeleteOutcome {
-    let metadata = match async_fs::symlink_metadata(&path).await {
+    let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return DeleteOutcome::Missing,
         Err(error) => return DeleteOutcome::Failed(error),
@@ -3146,20 +3383,41 @@ async fn delete_if_unchanged(
 
     let result = match kind {
         // Only ever a real folder here: a link to a folder is a `Symlink`.
-        ItemKind::Directory => async_fs::remove_dir_all(&path).await,
+        //
+        // Like `rm -rf`, this doesn't stop at mount points. Anything mounted somewhere inside
+        // the folder (a disk image, an SSHFS or other FUSE mount, a network share) has its
+        // contents deleted along with the rest, and the dialog gives no warning of it: its count
+        // covers only the items directly inside the folder that the tree has loaded. Stopping at
+        // mount points would take a recursion of our own in place of `remove_dir_all`, which is
+        // left for a separate change.
+        ItemKind::Directory => std::fs::remove_dir_all(path),
         // Windows stores a link to a folder as a directory entry, which `remove_file` refuses.
         #[cfg(windows)]
         ItemKind::Symlink
             if std::os::windows::fs::FileTypeExt::is_symlink_dir(&metadata.file_type()) =>
         {
-            async_fs::remove_dir(&path).await
+            std::fs::remove_dir(path)
         }
         // For a link, this removes the link itself, never the item it points to.
-        ItemKind::File | ItemKind::Symlink => async_fs::remove_file(&path).await,
+        ItemKind::File | ItemKind::Symlink => std::fs::remove_file(path),
     };
-    match result {
-        Ok(()) => DeleteOutcome::Deleted,
-        Err(error) => DeleteOutcome::Failed(error),
+    match (result, kind) {
+        (Ok(()), _) => DeleteOutcome::Deleted,
+        // Deleting a folder removes what's inside it first, so by the time an error stops it,
+        // some of its contents may be gone.
+        (Err(error), ItemKind::Directory) => {
+            let gone = loaded_items
+                .into_iter()
+                .filter(|item| {
+                    matches!(
+                        std::fs::symlink_metadata(item.to_local_path_lossy()),
+                        Err(lstat_error) if lstat_error.kind() == io::ErrorKind::NotFound
+                    )
+                })
+                .collect();
+            DeleteOutcome::FolderPartlyDeleted { error, gone }
+        }
+        (Err(error), ItemKind::File | ItemKind::Symlink) => DeleteOutcome::Failed(error),
     }
 }
 
@@ -3201,48 +3459,18 @@ impl View for FileTreeView {
 
     #[cfg(feature = "local_fs")]
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
-        if matches!(self.enablement, CodingPanelEnablementState::Disabled) {
-            return self.render_error_state(DISABLED_TEXT.to_string(), app);
-        }
-
-        if matches!(
-            self.enablement,
-            CodingPanelEnablementState::PendingRemoteSession
-        ) {
-            return self.render_loading_state(app);
-        }
-
-        if self.displayed_directories.is_empty() {
-            if let CodingPanelEnablementState::RemoteSession { has_remote_server } = self.enablement
-            {
-                // When the session has a remote server connection (Auto SSH
-                // Warpification / mode 1), show a loading state — the server
-                // may push repo metadata momentarily. For other SSH modes
-                // (tmux, subshell) no data will arrive, so show the disabled
-                // error instead.
-                return if has_remote_server {
-                    self.render_loading_state(app)
-                } else {
-                    self.render_error_state(REMOTE_TEXT.to_string(), app)
-                };
-            }
-
-            if matches!(
-                self.enablement,
-                CodingPanelEnablementState::UnsupportedSession
-            ) {
-                return self.render_error_state(WSL_TEXT.to_string(), app);
-            }
-
-            return self.render_loading_state(app);
-        }
-
-        self.render_file_tree(app)
+        self.with_delete_dialog(self.render_content(app))
     }
 
     fn on_blur(&mut self, _: &BlurContext, ctx: &mut ViewContext<Self>) {
         if !ctx.is_self_or_child_focused() {
             self.handle_pending_edit(ctx);
+            // Focus has left the file tree and its delete dialog, for example because a shortcut
+            // opened a new tab. The dialog would otherwise stay on screen, blocking the mouse,
+            // while its keys went somewhere else. Close it, and leave focus where it went.
+            if self.pending_delete.is_some() {
+                self.close_delete_dialog(ctx);
+            }
         }
     }
 }
@@ -3251,6 +3479,16 @@ impl TypedActionView for FileTreeView {
     type Action = FileTreeAction;
 
     fn handle_action(&mut self, action: &Self::Action, ctx: &mut ViewContext<Self>) {
+        // While the delete dialog is open, the tree behind it takes no action at all. The dialog
+        // has focus, but keys it doesn't bind, such as the arrows, fall through to the tree, and
+        // the tree mustn't move, open or change anything under the dialog's question. Every
+        // action is held back, rather than a list of known ones, so a binding added later is
+        // held back too. Nothing else sends the tree actions meanwhile: the menu that opened the
+        // dialog has closed, and the dialog's backdrop takes the mouse.
+        if self.pending_delete.is_some() {
+            log::debug!("Ignoring {action:?}: the delete dialog is open");
+            return;
+        }
         match action {
             FileTreeAction::ItemClicked { id } => {
                 ctx.focus_self();
