@@ -137,6 +137,23 @@ impl PaneNodeSnapshot {
         }
     }
 
+    /// Every terminal leaf under this node, in tree order.
+    pub fn terminal_leaves(&self) -> Vec<&TerminalPaneSnapshot> {
+        match self {
+            PaneNodeSnapshot::Leaf(leaf) => {
+                if let LeafContents::Terminal(terminal) = &leaf.contents {
+                    vec![terminal]
+                } else {
+                    vec![]
+                }
+            }
+            PaneNodeSnapshot::Branch(BranchSnapshot { children, .. }) => children
+                .iter()
+                .flat_map(|(_, child)| child.terminal_leaves())
+                .collect(),
+        }
+    }
+
     /// Calls `f` on every terminal leaf under this node, in tree order.
     pub fn for_each_terminal_leaf_mut(&mut self, f: &mut impl FnMut(&mut TerminalPaneSnapshot)) {
         match self {

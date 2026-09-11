@@ -25,6 +25,7 @@ use super::{
 use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
 use crate::ai::agent::conversation::{AIConversationId, ConversationStatus};
 use crate::ai::agent::{RenderableAIError, StartAgentExecutionMode};
+use crate::ai::agent_management::AgentNotificationsModel;
 use crate::ai::ambient_agents::task::{normalize_orchestrator_agent_name, HarnessConfig};
 use crate::ai::ambient_agents::{AgentConfigSnapshot, AmbientAgentTaskId};
 use crate::ai::blocklist::agent_view::{AgentViewControllerEvent, AgentViewEntryOrigin};
@@ -517,7 +518,10 @@ impl PaneContent for TerminalPane {
                 conversation_ids_to_restore: vec![],
                 active_conversation_id: None,
                 claude_session_id: None,
-                marked_unread: false,
+                marked_unread: AgentNotificationsModel::unread_for_snapshot(
+                    self.terminal_view(app).id(),
+                    app,
+                ),
             })
         } else if let Some(task_id) = view
             .ambient_agent_view_model()
@@ -549,7 +553,10 @@ impl PaneContent for TerminalPane {
                     conversation_ids_to_restore: vec![],
                     active_conversation_id: None,
                     claude_session_id: None,
-                    marked_unread: false,
+                    marked_unread: AgentNotificationsModel::unread_for_snapshot(
+                        self.terminal_view(app).id(),
+                        app,
+                    ),
                 })
             }
         } else {
@@ -622,7 +629,7 @@ impl PaneContent for TerminalPane {
                 conversation_ids_to_restore,
                 active_conversation_id,
                 claude_session_id,
-                marked_unread: false,
+                marked_unread: AgentNotificationsModel::unread_for_snapshot(tv_id, app),
             })
         }
     }

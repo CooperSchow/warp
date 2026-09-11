@@ -65,6 +65,7 @@ use super::model::{
     MCP_SERVER_PANE_KIND, NOTEBOOK_PANE_KIND, SETTINGS_PANE_KIND, TERMINAL_PANE_KIND,
     WORKFLOW_PANE_KIND,
 };
+use super::pane_marks::{self, MarkColumns};
 use super::{
     schema, BlockCompleted, FinishedCommandMetadata, ModelEvent, PersistedData, PersistedDataScope,
     PersistenceScope, StartedCommandMetadata, WriterHandles,
@@ -1151,6 +1152,10 @@ fn save_app_state(conn: &mut SqliteConnection, app_state: &AppState) -> Result<(
                 .values(active_mcp_servers)
                 .execute(conn)?;
         }
+
+        // Stars and unread marks, last and in a savepoint of their own: a
+        // failure there rolls back only the marks, and this save still commits.
+        pane_marks::save_pane_marks(conn, app_state);
 
         Ok(())
     })?;
@@ -2514,6 +2519,11 @@ fn read_sqlite_data(
             .load::<TabGroup>(conn)?
             .grouped_by(&db_windows);
 
+        // Stars and unread marks from the mirror, which an older build's saves
+        // leave alone. A read that fails gives no marks, and restore goes on.
+        let mark_columns = MarkColumns::from_flags();
+        let marks = pane_marks::read_pane_marks(conn, mark_columns);
+
         let saved_windows: Vec<_> = db_windows
             .into_iter()
             .enumerate()
@@ -2558,7 +2568,7 @@ fn read_sqlite_data(
                             let group_id = tab
                                 .tab_group_id
                                 .and_then(|row_id| tab_group_id_by_row_id.get(&row_id).copied());
-                            Some(TabSnapshot {
+                            let mut tab_snapshot = TabSnapshot {
                                 root,
                                 custom_title: tab.custom_title,
                                 default_directory_color: None,
@@ -2580,7 +2590,9 @@ fn read_sqlite_data(
                                 right_panel,
                                 group_id,
                                 pinned: tab.pinned,
-                            })
+                            };
+                            marks.apply_to_tab(&mut tab_snapshot);
+                            Some(tab_snapshot)
                         })
                         .collect();
 
@@ -2654,7 +2666,7 @@ fn read_sqlite_data(
                             .is_some()
                     });
 
-                    WindowSnapshot {
+                    let mut window_snapshot = WindowSnapshot {
                         tabs: saved_tabs,
                         active_tab_index: tab_index,
                         quake_mode: window.quake_mode,
@@ -2672,7 +2684,13 @@ fn read_sqlite_data(
                             .agent_management_filters
                             .and_then(|s| serde_json::from_str(&s).ok()),
                         tab_groups: tab_groups_snapshots,
+                    };
+                    // A star recovered from the mirror can sit anywhere an older
+                    // build left its tab; starred tabs lead the list.
+                    if mark_columns.starred {
+                        pane_marks::repair_starred_prefix(&mut window_snapshot);
                     }
+                    window_snapshot
                 },
             )
             .collect();

@@ -6,6 +6,8 @@ use ai::workspace::WorkspaceMetadata;
 use chrono::Utc;
 use cloud_object_persistence::to_cloud_object_permissions;
 use diesel::connection::SimpleConnection;
+use diesel::sqlite::SqliteConnection;
+use diesel::{ExpressionMethods, QueryDsl, RunQueryDsl, SelectableHelper};
 use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::Vector2F;
 use warp_core::features::FeatureFlag;
@@ -17,13 +19,16 @@ use super::{
     read_sqlite_data, save_app_state, save_codebase_index_metadata, setup_database, start_writer,
 };
 use crate::app_state::{
-    AppState, CodePaneSnapShot, CodePaneTabSnapshot, LeafContents, LeafSnapshot, PaneNodeSnapshot,
-    TabGroupSnapshot, TabSnapshot, TerminalPaneSnapshot, WindowSnapshot,
+    AppState, BranchSnapshot, CodePaneSnapShot, CodePaneTabSnapshot, LeafContents, LeafSnapshot,
+    PaneFlex, PaneNodeSnapshot, SplitDirection, TabGroupSnapshot, TabSnapshot,
+    TerminalPaneSnapshot, WindowSnapshot,
 };
 use crate::cloud_object::{CloudObjectPermissions, Owner};
 use crate::code::editor_management::CodeSource;
 use crate::notebooks::{CloudNotebook, CloudNotebookModel};
-use crate::persistence::model::ObjectPermissions;
+use crate::persistence::model::{ObjectPermissions, PaneMark};
+use crate::persistence::pane_marks::take_mirror_warnings;
+use crate::persistence::schema;
 use crate::persistence::{BlockCompleted, ModelEvent, PersistedDataScope, PersistenceScope};
 use crate::server::ids::ClientId;
 use crate::tab::SelectedTabColor;
@@ -1025,4 +1030,466 @@ fn test_sqlite_drops_too_small_bounds_on_read() {
         restored.windows[0].bounds.is_none(),
         "tiny persisted bounds must be discarded on read so users recover from a corrupt DB"
     );
+}
+
+/// Runs `f` with pinned tabs, stars and Mark as Unread all on or all off: a
+/// build of the fork with tab marks, or one from before them.
+fn with_tab_mark_flags<T>(enabled: bool, f: impl FnOnce() -> T) -> T {
+    let _pins = FeatureFlag::PinnedTabs.override_enabled(enabled);
+    let _stars = FeatureFlag::StarredTabs.override_enabled(enabled);
+    let _unread = FeatureFlag::TabMarkUnread.override_enabled(enabled);
+    f()
+}
+
+fn marked_terminal(uuid: u8, marked_unread: bool) -> PaneNodeSnapshot {
+    PaneNodeSnapshot::Leaf(LeafSnapshot {
+        is_focused: false,
+        custom_vertical_tabs_title: None,
+        contents: LeafContents::Terminal(TerminalPaneSnapshot {
+            uuid: vec![uuid],
+            cwd: Some("/tmp".to_string()),
+            shell_launch_data: Some(ShellLaunchData::Executable {
+                executable_path: PathBuf::from("/bin/zsh"),
+                shell_type: crate::terminal::shell::ShellType::Zsh,
+            }),
+            is_active: false,
+            is_read_only: false,
+            input_config: None,
+            llm_model_override: None,
+            active_profile_id: None,
+            conversation_ids_to_restore: vec![],
+            active_conversation_id: None,
+            claude_session_id: None,
+            marked_unread,
+        }),
+    })
+}
+
+fn marked_split(children: Vec<PaneNodeSnapshot>) -> PaneNodeSnapshot {
+    PaneNodeSnapshot::Branch(BranchSnapshot {
+        direction: SplitDirection::Horizontal,
+        children: children
+            .into_iter()
+            .map(|child| (PaneFlex(1.), child))
+            .collect(),
+    })
+}
+
+fn marked_tab(root: PaneNodeSnapshot, pinned: bool, group_id: Option<TabGroupId>) -> TabSnapshot {
+    TabSnapshot {
+        custom_title: None,
+        root,
+        default_directory_color: None,
+        selected_color: SelectedTabColor::default(),
+        left_panel: None,
+        right_panel: None,
+        group_id,
+        pinned,
+    }
+}
+
+fn marked_app_state(
+    tabs: Vec<TabSnapshot>,
+    tab_groups: Vec<TabGroupSnapshot>,
+    active_tab_index: usize,
+) -> AppState {
+    AppState {
+        windows: vec![WindowSnapshot {
+            tabs,
+            active_tab_index,
+            bounds: None,
+            fullscreen_state: Default::default(),
+            quake_mode: false,
+            universal_search_width: None,
+            warp_ai_width: None,
+            voltron_width: None,
+            warp_drive_index_width: None,
+            left_panel_open: false,
+            vertical_tabs_panel_open: false,
+            left_panel_width: None,
+            right_panel_width: None,
+            agent_management_filters: None,
+            tab_groups,
+        }],
+        active_window_index: Some(0),
+        block_lists: Default::default(),
+        running_mcp_servers: Default::default(),
+    }
+}
+
+fn marks_database() -> (tempfile::TempDir, SqliteConnection) {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let conn =
+        setup_database(&tempdir.path().join("warp.sqlite")).expect("database should initialize");
+    (tempdir, conn)
+}
+
+/// Every row of `pane_marks`, by uuid.
+fn stored_pane_marks(conn: &mut SqliteConnection) -> Vec<(Vec<u8>, bool, bool)> {
+    schema::pane_marks::table
+        .select(PaneMark::as_select())
+        .order(schema::pane_marks::pane_uuid)
+        .load(conn)
+        .expect("pane_marks should load")
+        .into_iter()
+        .map(|mark| (mark.pane_uuid, mark.starred, mark.marked_unread))
+        .collect()
+}
+
+/// The one window a test saved, read back.
+fn restore_window(conn: &mut SqliteConnection) -> WindowSnapshot {
+    let mut restored = read_sqlite_data(conn, None, PersistedDataScope::Full)
+        .expect("app state should load")
+        .app_state
+        .expect("app state should be present for the full scope");
+    assert_eq!(restored.windows.len(), 1);
+    restored.windows.remove(0)
+}
+
+/// Each restored tab as its terminal panes' uuids, whether it's starred, and
+/// each of those panes' unread marks.
+fn restored_tabs(window: &WindowSnapshot) -> Vec<(Vec<u8>, bool, Vec<bool>)> {
+    window
+        .tabs
+        .iter()
+        .map(|tab| {
+            let terminals = tab.root.terminal_leaves();
+            (
+                terminals
+                    .iter()
+                    .flat_map(|terminal| terminal.uuid.clone())
+                    .collect(),
+                tab.pinned,
+                terminals
+                    .iter()
+                    .map(|terminal| terminal.marked_unread)
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// Persistence test 1.
+#[test]
+fn stars_and_unread_marks_round_trip_through_pane_marks() {
+    let (_tempdir, mut conn) = marks_database();
+    let starred_group = TabGroupId::new();
+    let app_state = marked_app_state(
+        vec![
+            marked_tab(
+                marked_split(vec![marked_terminal(1, false), marked_terminal(2, false)]),
+                true,
+                None,
+            ),
+            marked_tab(marked_terminal(3, false), false, Some(starred_group)),
+            marked_tab(marked_terminal(4, true), false, None),
+            marked_tab(marked_terminal(5, false), false, None),
+        ],
+        vec![TabGroupSnapshot {
+            id: starred_group,
+            name: Some("Starred group".to_string()),
+            color: SelectedTabColor::default(),
+            collapsed: false,
+            pinned: true,
+        }],
+        2,
+    );
+
+    with_tab_mark_flags(true, || {
+        save_app_state(&mut conn, &app_state).expect("app state should save");
+
+        // The starred tab's terminal panes and the unread one; a starred
+        // group's members aren't mirrored.
+        assert_eq!(
+            stored_pane_marks(&mut conn),
+            vec![
+                (vec![1], true, false),
+                (vec![2], true, false),
+                (vec![4], false, true),
+            ]
+        );
+        let restored = restore_window(&mut conn);
+        assert_eq!(
+            restored_tabs(&restored),
+            vec![
+                (vec![1, 2], true, vec![false, false]),
+                (vec![3], false, vec![false]),
+                (vec![4], false, vec![true]),
+                (vec![5], false, vec![false]),
+            ]
+        );
+        assert_eq!(restored.active_tab_index, 2);
+    });
+}
+
+/// Persistence test 2: an older build's save drops `tabs.pinned` but never
+/// touches `pane_marks`, so the star comes back, repaired to the front.
+#[test]
+fn a_star_survives_an_older_builds_save_and_returns_to_the_front() {
+    let (_tempdir, mut conn) = marks_database();
+    let starred = |pinned| marked_tab(marked_terminal(1, false), pinned, None);
+    let plain = |uuid| marked_tab(marked_terminal(uuid, false), false, None);
+
+    with_tab_mark_flags(true, || {
+        save_app_state(
+            &mut conn,
+            &marked_app_state(vec![starred(true), plain(2), plain(3)], vec![], 1),
+        )
+        .expect("app state should save");
+    });
+    // The older build saves every tab unpinned, after the starred tab was
+    // dragged to the end there.
+    with_tab_mark_flags(false, || {
+        save_app_state(
+            &mut conn,
+            &marked_app_state(vec![plain(2), plain(3), starred(false)], vec![], 0),
+        )
+        .expect("app state should save");
+        assert_eq!(
+            stored_pane_marks(&mut conn),
+            vec![(vec![1], true, false)],
+            "an older build leaves pane_marks alone"
+        );
+        assert!(
+            restore_window(&mut conn).tabs.iter().all(|tab| !tab.pinned),
+            "tabs.pinned no longer has the star"
+        );
+    });
+
+    with_tab_mark_flags(true, || {
+        let restored = restore_window(&mut conn);
+        assert_eq!(
+            restored_tabs(&restored),
+            vec![
+                (vec![1], true, vec![false]),
+                (vec![2], false, vec![false]),
+                (vec![3], false, vec![false]),
+            ]
+        );
+        assert_eq!(
+            restored.active_tab_index, 1,
+            "the tab that was active is still active"
+        );
+    });
+}
+
+/// Persistence test 3, in the database. Restoring the mark as staged and then
+/// committing it is covered with the workspace, in `tab_unread_tests.rs`.
+#[test]
+fn an_unread_mark_survives_an_older_builds_save() {
+    let (_tempdir, mut conn) = marks_database();
+    let state = |marked_unread| {
+        marked_app_state(
+            vec![
+                marked_tab(marked_terminal(1, marked_unread), false, None),
+                marked_tab(marked_terminal(2, false), false, None),
+            ],
+            vec![],
+            1,
+        )
+    };
+
+    with_tab_mark_flags(true, || {
+        save_app_state(&mut conn, &state(true)).expect("app state should save");
+    });
+    with_tab_mark_flags(false, || {
+        save_app_state(&mut conn, &state(false)).expect("app state should save");
+        assert_eq!(stored_pane_marks(&mut conn), vec![(vec![1], false, true)]);
+        assert_eq!(
+            restored_tabs(&restore_window(&mut conn))[0],
+            (vec![1], false, vec![false]),
+            "an older build doesn't read the mark"
+        );
+    });
+
+    with_tab_mark_flags(true, || {
+        assert_eq!(
+            restored_tabs(&restore_window(&mut conn))[0],
+            (vec![1], false, vec![true])
+        );
+    });
+}
+
+/// Persistence test 4.
+#[test]
+fn a_save_with_both_marks_off_leaves_pane_marks_alone() {
+    let (_tempdir, mut conn) = marks_database();
+    with_tab_mark_flags(true, || {
+        save_app_state(
+            &mut conn,
+            &marked_app_state(
+                vec![
+                    marked_tab(marked_terminal(1, false), true, None),
+                    marked_tab(marked_terminal(2, true), false, None),
+                ],
+                vec![],
+                0,
+            ),
+        )
+        .expect("app state should save");
+    });
+
+    with_tab_mark_flags(false, || {
+        save_app_state(
+            &mut conn,
+            &marked_app_state(
+                vec![marked_tab(marked_terminal(9, true), true, None)],
+                vec![],
+                0,
+            ),
+        )
+        .expect("app state should save");
+    });
+
+    // Neither deleted nor added to.
+    assert_eq!(
+        stored_pane_marks(&mut conn),
+        vec![(vec![1], true, false), (vec![2], false, true)]
+    );
+}
+
+/// Persistence test 5: the mirror write is a savepoint inside the save's
+/// transaction. With `pane_marks` gone it fails, the failure is logged, and
+/// the rest of the save commits.
+#[test]
+fn a_failed_mirror_write_leaves_the_save_committed() {
+    let (_tempdir, mut conn) = marks_database();
+    conn.batch_execute("DROP TABLE pane_marks")
+        .expect("pane_marks should drop");
+    take_mirror_warnings();
+
+    with_tab_mark_flags(true, || {
+        save_app_state(
+            &mut conn,
+            &marked_app_state(
+                vec![
+                    marked_tab(marked_terminal(1, false), true, None),
+                    marked_tab(marked_terminal(2, true), false, None),
+                ],
+                vec![],
+                1,
+            ),
+        )
+        .expect("the save commits without its marks");
+
+        let warnings = take_mirror_warnings();
+        assert_eq!(warnings.len(), 1, "one warning: {warnings:?}");
+        assert!(warnings[0].contains("pane_marks"), "{warnings:?}");
+
+        let restored = restore_window(&mut conn);
+        assert_eq!(
+            restored_tabs(&restored),
+            vec![(vec![1], true, vec![false]), (vec![2], false, vec![false])],
+            "the tabs round-trip; only the unread mark, which lives in the mirror, is lost"
+        );
+        assert_eq!(restored.active_tab_index, 1);
+    });
+}
+
+/// The savepoint also undoes the mirror's own partial work: here the insert
+/// fails after the delete has run, and the marks from the last good save are
+/// still there while the rest of the new save commits.
+#[test]
+fn a_mirror_write_that_fails_halfway_keeps_the_last_good_marks() {
+    let (_tempdir, mut conn) = marks_database();
+    with_tab_mark_flags(true, || {
+        save_app_state(
+            &mut conn,
+            &marked_app_state(
+                vec![marked_tab(marked_terminal(1, false), true, None)],
+                vec![],
+                0,
+            ),
+        )
+        .expect("app state should save");
+    });
+    conn.batch_execute(
+        "CREATE TRIGGER refuse_pane_marks BEFORE INSERT ON pane_marks \
+         BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+    )
+    .expect("the trigger should install");
+    take_mirror_warnings();
+
+    with_tab_mark_flags(true, || {
+        save_app_state(
+            &mut conn,
+            &marked_app_state(
+                vec![
+                    marked_tab(marked_terminal(2, true), false, None),
+                    marked_tab(marked_terminal(1, false), false, None),
+                ],
+                vec![],
+                0,
+            ),
+        )
+        .expect("the save commits without its marks");
+        assert_eq!(take_mirror_warnings().len(), 1);
+        assert_eq!(
+            stored_pane_marks(&mut conn),
+            vec![(vec![1], true, false)],
+            "the mirror's delete was rolled back with its failed insert"
+        );
+
+        // The new save's tabs, with the last good star: tab 2 is new.
+        let restored = restore_window(&mut conn);
+        assert_eq!(
+            restored_tabs(&restored),
+            vec![(vec![1], true, vec![false]), (vec![2], false, vec![false])]
+        );
+        assert_eq!(restored.active_tab_index, 1);
+    });
+}
+
+/// Persistence test 6.
+#[test]
+fn restore_goes_ahead_without_pane_marks() {
+    let (_tempdir, mut conn) = marks_database();
+    with_tab_mark_flags(true, || {
+        save_app_state(
+            &mut conn,
+            &marked_app_state(
+                vec![
+                    marked_tab(marked_terminal(1, false), true, None),
+                    marked_tab(marked_terminal(2, true), false, None),
+                ],
+                vec![],
+                0,
+            ),
+        )
+        .expect("app state should save");
+        conn.batch_execute("DROP TABLE pane_marks")
+            .expect("pane_marks should drop");
+
+        assert_eq!(
+            restored_tabs(&restore_window(&mut conn)),
+            vec![(vec![1], true, vec![false]), (vec![2], false, vec![false])]
+        );
+    });
+}
+
+/// Persistence test 8. `pane_marks` itself matches its migration
+/// (`pane_marks::tests::migration_creates_pane_marks_with_false_defaults`);
+/// here, a `tabs` row inserted the way a build from before `pinned` would,
+/// naming no value for it, reads back unpinned.
+#[test]
+fn a_tab_saved_without_a_pinned_value_reads_back_unpinned() {
+    let (_tempdir, mut conn) = marks_database();
+    save_app_state(
+        &mut conn,
+        &marked_app_state(
+            vec![marked_tab(marked_terminal(1, false), false, None)],
+            vec![],
+            0,
+        ),
+    )
+    .expect("app state should save");
+    conn.batch_execute("INSERT INTO tabs (window_id) SELECT id FROM windows LIMIT 1")
+        .expect("an old-shape tab should insert");
+
+    let pinned: bool = schema::tabs::table
+        .select(schema::tabs::pinned)
+        .order(schema::tabs::id.desc())
+        .first(&mut conn)
+        .expect("the tab should read back");
+    assert!(!pinned);
 }

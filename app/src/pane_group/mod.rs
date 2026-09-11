@@ -49,6 +49,7 @@ use crate::ai::agent_conversations_model::{
     AgentConversationEntryId, AgentConversationNavigationSubject, AgentConversationsModel,
     AgentConversationsModelEvent,
 };
+use crate::ai::agent_management::AgentNotificationsModel;
 use crate::ai::ai_document_view::AIDocumentView;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::blocklist::agent_view::AgentViewEntryOrigin;
@@ -1706,6 +1707,18 @@ impl PaneGroup {
                 );
 
                 let terminal_view_id = terminal_view.id();
+
+                // A pane saved showing the unread dot shows it again. The mark is
+                // staged, so no focus report can clear it until restore has
+                // activated the window's tab and committed the marks.
+                if terminal_snapshot.marked_unread
+                    && FeatureFlag::TabMarkUnread.is_enabled()
+                    && ctx.has_singleton_model::<AgentNotificationsModel>()
+                {
+                    AgentNotificationsModel::handle(ctx).update(ctx, |model, ctx| {
+                        model.stage_restored_unread(terminal_view_id, ctx);
+                    });
+                }
 
                 // Resume a Claude Code session that was live in this pane at save
                 // time, so restored tabs reopen into their conversation instead of a

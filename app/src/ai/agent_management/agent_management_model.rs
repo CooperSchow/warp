@@ -101,6 +101,16 @@ impl AgentNotificationsModel {
             .has_unread_for_terminal_view(terminal_view_id)
     }
 
+    /// Whether a snapshot records the terminal view as unread. It records the
+    /// dot as shown, whatever lit it, so a finished session nobody opened
+    /// still shows its dot after a relaunch. False while `TabMarkUnread` is
+    /// off, and in a harness that never registered this model.
+    pub(crate) fn unread_for_snapshot(terminal_view_id: EntityId, app: &AppContext) -> bool {
+        FeatureFlag::TabMarkUnread.is_enabled()
+            && app.has_singleton_model::<Self>()
+            && Self::as_ref(app).is_unread(terminal_view_id)
+    }
+
     /// Marks the terminal views unread by hand. A mark holds until its view is
     /// arrived at, replied to, marked read, or closed for good.
     pub(crate) fn mark_unread(
