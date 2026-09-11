@@ -98,6 +98,26 @@ pub(crate) fn tab_mark_target(pane_group: &PaneGroup, app: &AppContext) -> Optio
         .or_else(|| row_terminal_views(pane_group, app).into_iter().next())
 }
 
+/// Whether ⌃⌘U, pressed with this tab active, does exactly what the tab
+/// menu's item for the pane showing `terminal_view_id` does. With no unread
+/// pane the key marks the tab's mark target, which is Mark as Unread on that
+/// pane. With one, it clears every pane, which is Mark as Read on this pane
+/// only when this pane is the tab's one unread pane.
+pub(crate) fn toggle_key_acts_on_pane(
+    pane_group: &PaneGroup,
+    terminal_view_id: EntityId,
+    app: &AppContext,
+) -> bool {
+    if tab_is_unread(pane_group, app) {
+        let notifications = AgentNotificationsModel::as_ref(app);
+        all_terminal_views(pane_group, app)
+            .into_iter()
+            .all(|view| notifications.is_unread(view) == (view == terminal_view_id))
+    } else {
+        tab_mark_target(pane_group, app) == Some(terminal_view_id)
+    }
+}
+
 /// Every terminal view the tab holds, hidden ones included: what Mark as Read
 /// clears for a whole tab, and where restore looks for staged marks.
 fn all_terminal_views(pane_group: &PaneGroup, app: &AppContext) -> Vec<EntityId> {

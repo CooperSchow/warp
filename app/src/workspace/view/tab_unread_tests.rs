@@ -6,7 +6,10 @@ use settings::Setting as _;
 use warp_errors::report_if_error;
 use warpui::platform::WindowStyle;
 use warpui::r#async::Timer;
-use warpui::{App, AppContext, EntityId, SingletonEntity as _, View as _, ViewContext, ViewHandle};
+use warpui::{
+    App, AppContext, EntityId, SingletonEntity as _, TypedActionView as _, View as _, ViewContext,
+    ViewHandle,
+};
 
 use super::{row_shows_unread, tab_is_unread, ARRIVAL_DWELL, STAGED_UNREAD_FALLBACK_COMMIT};
 use crate::ai::agent_management::{ActiveWindowForTests, AgentNotificationsModel};
@@ -17,8 +20,10 @@ use crate::notebooks::notebook::NotebookView;
 use crate::pane_group::{Direction, NotebookPane, PaneGroup, PaneId};
 use crate::root_view::NewWorkspaceSource;
 use crate::tab::PaneNameMenuTarget;
+use crate::util::bindings::keybinding_name_to_display_string;
 use crate::workspace::tab_settings::{TabSettings, VerticalTabsDisplayGranularity};
 use crate::workspace::view::tests::{initialize_app, mock_workspace};
+use crate::workspace::view::TOGGLE_ACTIVE_TAB_UNREAD_BINDING_NAME;
 use crate::workspace::{PaneViewLocator, Workspace, WorkspaceAction};
 use crate::GlobalResourceHandles;
 
@@ -105,6 +110,7 @@ fn menu_items(
         tab_index,
         workspace.tabs.len(),
         0,
+        tab_index == workspace.active_tab_index,
         &HashMap::new(),
         false,
         false,
@@ -137,6 +143,26 @@ fn unread_item(
                 None
             }
         })
+}
+
+/// The tab menu's unread item: what choosing it does, and its key hint.
+fn unread_item_action_and_hint(
+    workspace: &Workspace,
+    tab_index: usize,
+    target: Option<PaneNameMenuTarget>,
+    app: &AppContext,
+) -> (WorkspaceAction, Option<String>) {
+    menu_items(workspace, tab_index, target, app)
+        .iter()
+        .filter_map(MenuItem::fields)
+        .find_map(|fields| match fields.on_select_action() {
+            Some(action @ WorkspaceAction::SetTabUnread { .. }) => Some((
+                action.clone(),
+                fields.key_shortcut_label().map(str::to_owned),
+            )),
+            _ => None,
+        })
+        .expect("the tab menu has an unread item")
 }
 
 fn restore(app: &mut App, window_snapshot: WindowSnapshot) -> ViewHandle<Workspace> {
@@ -264,6 +290,106 @@ fn the_menu_label_agrees_with_the_row_dot_for_every_layout_focus_and_unread_set(
             });
         }
         assert_eq!(cases, 3 * 2 * 4);
+    });
+}
+
+/// ⌃⌘U's hint shows beside Mark as Unread or Mark as Read exactly where
+/// pressing the key leaves the same marks as choosing the item. Swept over
+/// every layout × which tab is active × which of a split tab's terminals has
+/// focus × which terminals are unread × each of the split tab's menus (the
+/// whole tab, a right-click around its rows, and each row). That comes to the
+/// active tab's whole-tab items, and a pane's own item only for the pane the
+/// key acts on.
+#[test]
+fn the_unread_hint_shows_exactly_where_the_key_does_what_the_item_does() {
+    let _unread = FeatureFlag::TabMarkUnread.override_enabled(true);
+    let _vertical_tabs = FeatureFlag::VerticalTabs.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        // Tab 0 holds terminals a and b; tab 1 holds one more.
+        let (pane_group_id, a, b) = workspace.update(&mut app, |workspace, ctx| {
+            let (a, b) = split_into_two_terminals(workspace, 0, ctx);
+            workspace.add_terminal_tab(false, ctx);
+            (workspace.tabs[0].pane_group.id(), a, b)
+        });
+
+        let (mut cases, mut hinted) = (0, 0);
+        for (vertical, granularity) in [
+            (false, VerticalTabsDisplayGranularity::Tabs),
+            (true, VerticalTabsDisplayGranularity::Tabs),
+            (true, VerticalTabsDisplayGranularity::Panes),
+        ] {
+            set_tab_layout(&mut app, vertical, granularity);
+            workspace.update(&mut app, |workspace, ctx| {
+                let hint =
+                    keybinding_name_to_display_string(TOGGLE_ACTIVE_TAB_UNREAD_BINDING_NAME, ctx);
+                let pane_group = workspace.tabs[0].pane_group.clone();
+                let views = [
+                    terminal_view_id(pane_group.as_ref(ctx), a, ctx),
+                    terminal_view_id(pane_group.as_ref(ctx), b, ctx),
+                    focused_terminal_view_id(workspace, 1, ctx),
+                ];
+                for active in [0, 1] {
+                    for focused in [a, b] {
+                        for unread_set in 0..8 {
+                            let unread: Vec<EntityId> = views
+                                .iter()
+                                .enumerate()
+                                .filter(|(index, _)| unread_set & (1 << index) != 0)
+                                .map(|(_, view)| *view)
+                                .collect();
+                            let reset = |workspace: &mut Workspace,
+                                         ctx: &mut ViewContext<Workspace>| {
+                                workspace.activate_tab(active, ctx);
+                                pane_group.update(ctx, |pane_group, ctx| {
+                                    pane_group.focus_pane_by_id(focused, ctx);
+                                });
+                                set_marks(&views, &unread, ctx);
+                            };
+                            let rows = match (vertical, granularity) {
+                                (false, _) => vec![],
+                                (true, VerticalTabsDisplayGranularity::Tabs) => vec![focused],
+                                (true, VerticalTabsDisplayGranularity::Panes) => vec![a, b],
+                            };
+                            let targets = [None, Some(tab_target(pane_group_id, focused))]
+                                .into_iter()
+                                .chain(rows.into_iter().map(|row| Some(row_target(pane_group_id, row))));
+                            for target in targets {
+                                let case = format!(
+                                    "vertical {vertical}, {granularity:?}, tab {active} active, \
+                                     focused {focused:?}, unread set {unread_set}, \
+                                     row {:?}",
+                                    target.filter(|target| target.is_pane_row).map(|target| target.locator.pane_id)
+                                );
+                                reset(workspace, ctx);
+                                let (action, shown_hint) =
+                                    unread_item_action_and_hint(workspace, 0, target, ctx);
+
+                                workspace.handle_action(&WorkspaceAction::ToggleActiveTabUnread, ctx);
+                                let after_key = views.map(|view| is_unread(view, ctx));
+                                reset(workspace, ctx);
+                                workspace.handle_action(&action, ctx);
+                                let after_item = views.map(|view| is_unread(view, ctx));
+
+                                let same = after_key == after_item;
+                                assert_eq!(
+                                    shown_hint,
+                                    hint.clone().filter(|_| same),
+                                    "{case}: the key leaves {after_key:?}, the item {after_item:?}"
+                                );
+                                cases += 1;
+                                hinted += usize::from(same);
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        // Per active tab, focus and unread set: two whole-tab items
+        // horizontally, three vertically in Tabs, four in Panes.
+        assert_eq!(cases, 2 * 2 * 8 * (2 + 3 + 4));
+        assert!(0 < hinted && hinted < cases, "{hinted} of {cases} hinted");
     });
 }
 

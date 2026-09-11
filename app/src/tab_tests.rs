@@ -199,6 +199,7 @@ fn tab_menu_is_unchanged_with_tab_mark_flags_off() {
                                 index,
                                 tab_count,
                                 0,
+                                index == workspace.active_tab_index(),
                                 &HashMap::new(),
                                 false,
                                 index > 0,
@@ -243,6 +244,7 @@ fn tab_marks_section_opens_the_menu() {
                     0,
                     1,
                     0,
+                    true,
                     &HashMap::new(),
                     false,
                     false,
@@ -317,6 +319,7 @@ fn bulk_close_items_across_every_small_tab_list() {
                                 index,
                                 tab_count,
                                 starred,
+                                index == workspace.active_tab_index(),
                                 &HashMap::new(),
                                 false,
                                 index > 0,
@@ -364,7 +367,8 @@ fn bulk_close_items_across_every_small_tab_list() {
 }
 
 /// The star item reads "Star tab", "Star tab (leaves group)" or "Unstar tab"
-/// from the tab's own state, with the star key as the keymap has it for a hint.
+/// from the tab's own state. It hints the star key, as the keymap has it, on
+/// the active tab's menu only, since the key stars the active tab.
 #[test]
 fn the_star_item_follows_the_tab_and_hints_the_live_key() {
     let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
@@ -388,21 +392,28 @@ fn the_star_item_follows_the_tab_and_hints_the_live_key() {
             ] {
                 workspace.tabs[0].pinned = pinned;
                 workspace.tabs[0].group_id = grouped.then(TabGroupId::new);
-                let items = workspace.tabs[0].menu_items(
-                    0,
-                    1,
-                    usize::from(pinned),
-                    &HashMap::new(),
-                    false,
-                    false,
-                    false,
-                    ctx,
-                );
-                let MenuItem::Item(fields) = &items[0] else {
-                    panic!("the menu opens with the star item");
-                };
-                assert_eq!(fields.label(), label);
-                assert_eq!(fields.key_shortcut_label(), hint.as_deref(), "{label}");
+                for is_active_tab in [true, false] {
+                    let items = workspace.tabs[0].menu_items(
+                        0,
+                        1,
+                        usize::from(pinned),
+                        is_active_tab,
+                        &HashMap::new(),
+                        false,
+                        false,
+                        false,
+                        ctx,
+                    );
+                    let MenuItem::Item(fields) = &items[0] else {
+                        panic!("the menu opens with the star item");
+                    };
+                    assert_eq!(fields.label(), label);
+                    assert_eq!(
+                        fields.key_shortcut_label(),
+                        hint.as_deref().filter(|_| is_active_tab),
+                        "{label}, active tab {is_active_tab}"
+                    );
+                }
             }
         });
     });

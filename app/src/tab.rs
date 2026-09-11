@@ -54,6 +54,7 @@ use crate::workspace::tab_settings::{
 use crate::workspace::view::starred_tabs::{render_pin_slot_mark, starred_tabs_enabled};
 use crate::workspace::view::tab_unread::{
     row_shows_unread, row_terminal_view, tab_mark_target, tab_unread_terminal_views,
+    toggle_key_acts_on_pane,
 };
 use crate::workspace::view::{
     TOGGLE_ACTIVE_TAB_STAR_BINDING_NAME, TOGGLE_ACTIVE_TAB_UNREAD_BINDING_NAME,
@@ -329,13 +330,16 @@ impl TabData {
 
     /// Returns the menu items for the context menu on right mouse click. The
     /// first `starred_boundary` tabs are starred, and the bulk closes spare
-    /// them.
+    /// them. `is_active_tab` says whether this is the active tab, the one the
+    /// tab-marks keys act on, so the menu hints a key only where pressing it
+    /// does what the item does.
     #[allow(clippy::too_many_arguments)]
     pub fn menu_items(
         &self,
         index: usize,
         tabs_len: usize,
         starred_boundary: usize,
+        is_active_tab: bool,
         tab_groups: &HashMap<TabGroupId, TabGroup>,
         is_only_member_of_group: bool,
         can_move_left: bool,
@@ -346,6 +350,7 @@ impl TabData {
             index,
             tabs_len,
             starred_boundary,
+            is_active_tab,
             tab_groups,
             is_only_member_of_group,
             can_move_left,
@@ -361,6 +366,7 @@ impl TabData {
         index: usize,
         tabs_len: usize,
         starred_boundary: usize,
+        is_active_tab: bool,
         tab_groups: &HashMap<TabGroupId, TabGroup>,
         is_only_member_of_group: bool,
         can_move_left: bool,
@@ -373,7 +379,7 @@ impl TabData {
         let mut menu_items = vec![];
 
         for section_items in [
-            self.tab_marks_menu_items(index, pane_name_target, ctx),
+            self.tab_marks_menu_items(index, is_active_tab, pane_name_target, ctx),
             self.tab_group_menu_items(index, tab_groups, is_only_member_of_group),
             self.session_sharing_menu_items(index, ctx),
             self.copy_metadata_menu_items(pane_name_target, ctx),
@@ -734,12 +740,13 @@ impl TabData {
     fn tab_marks_menu_items(
         &self,
         index: usize,
+        is_active_tab: bool,
         pane_name_target: Option<PaneNameMenuTarget>,
         ctx: &AppContext,
     ) -> Vec<MenuItem<WorkspaceAction>> {
-        self.unread_menu_item(pane_name_target, ctx)
+        self.unread_menu_item(is_active_tab, pane_name_target, ctx)
             .into_iter()
-            .chain(self.star_menu_item(index, ctx))
+            .chain(self.star_menu_item(index, is_active_tab, ctx))
             .collect()
     }
 
@@ -750,6 +757,7 @@ impl TabData {
     /// terminal pane.
     fn unread_menu_item(
         &self,
+        is_active_tab: bool,
         pane_name_target: Option<PaneNameMenuTarget>,
         ctx: &AppContext,
     ) -> Option<MenuItem<WorkspaceAction>> {
@@ -800,12 +808,21 @@ impl TabData {
         } else {
             "Mark as Unread"
         };
+        // ⌃⌘U acts on the active tab, so its hint shows only where pressing it
+        // does just what this item does: on the active tab, beside an item for
+        // the whole tab or for the one pane the key would act on.
+        let key_does_the_same = is_active_tab
+            && terminal_view_id.is_none_or(|terminal_view_id| {
+                toggle_key_acts_on_pane(pane_group, terminal_view_id, ctx)
+            });
+        let hint = if key_does_the_same {
+            keybinding_name_to_display_string(TOGGLE_ACTIVE_TAB_UNREAD_BINDING_NAME, ctx)
+        } else {
+            None
+        };
         Some(
             MenuItemFields::new(label)
-                .with_key_shortcut_label(keybinding_name_to_display_string(
-                    TOGGLE_ACTIVE_TAB_UNREAD_BINDING_NAME,
-                    ctx,
-                ))
+                .with_key_shortcut_label(hint)
                 .with_on_select_action(WorkspaceAction::SetTabUnread {
                     pane_group_id: self.pane_group.id(),
                     terminal_view_id,
@@ -817,7 +834,12 @@ impl TabData {
 
     /// "Star tab" or "Unstar tab"; upstream's "Pin tab" or "Unpin tab" when
     /// pins are on but stars are off.
-    fn star_menu_item(&self, index: usize, ctx: &AppContext) -> Option<MenuItem<WorkspaceAction>> {
+    fn star_menu_item(
+        &self,
+        index: usize,
+        is_active_tab: bool,
+        ctx: &AppContext,
+    ) -> Option<MenuItem<WorkspaceAction>> {
         if !FeatureFlag::PinnedTabs.is_enabled() {
             return None;
         }
@@ -828,11 +850,15 @@ impl TabData {
                 (false, true) => "Star tab (leaves group)",
                 (false, false) => "Star tab",
             };
+            // ⌃⌘S stars the active tab, so it does what this item does only
+            // when this is the active tab.
+            let hint = if is_active_tab {
+                keybinding_name_to_display_string(TOGGLE_ACTIVE_TAB_STAR_BINDING_NAME, ctx)
+            } else {
+                None
+            };
             MenuItemFields::new(label)
-                .with_key_shortcut_label(keybinding_name_to_display_string(
-                    TOGGLE_ACTIVE_TAB_STAR_BINDING_NAME,
-                    ctx,
-                ))
+                .with_key_shortcut_label(hint)
                 .with_on_select_action(WorkspaceAction::SetTabStarred {
                     pane_group_id: self.pane_group.id(),
                     starred: !self.pinned,

@@ -632,6 +632,7 @@ fn star_item_action(workspace: &Workspace, index: usize, ctx: &AppContext) -> Wo
         index,
         workspace.tabs.len(),
         workspace.starred_boundary(),
+        index == workspace.active_tab_index,
         &workspace.tab_groups,
         false,
         index > 0,
