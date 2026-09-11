@@ -12,7 +12,7 @@ use warpui::{AppContext, EntityId, SingletonEntity, ViewContext};
 
 use super::Workspace;
 use crate::features::FeatureFlag;
-use crate::tab::bulk_close_label;
+use crate::tab::{bulk_close_label, uses_vertical_tabs};
 use crate::workspace::WorkspaceRegistry;
 
 /// The star's box: about a 12 px title's cap height, plus the overshoot a
@@ -197,9 +197,12 @@ impl Workspace {
         } else {
             self.unpin_tab(index, ctx);
         }
-        // The tab moved; keep it in view where it landed.
-        if let Some(index) = self.tab_index_of(pane_group_id) {
-            self.reveal_tab_in_vertical_panel(index, ctx);
+        // The tab moved; when the vertical tabs panel shows it, keep it in view
+        // where it landed.
+        if self.vertical_tabs_panel_open && uses_vertical_tabs(ctx) {
+            if let Some(index) = self.tab_index_of(pane_group_id) {
+                self.vertical_tabs_panel.scroll_to_tab(index);
+            }
         }
     }
 

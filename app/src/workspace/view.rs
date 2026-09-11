@@ -16,7 +16,6 @@ pub(crate) mod openwarp_launch_modal;
 pub(crate) mod orchestration_launch_modal;
 pub(crate) mod right_panel;
 pub(crate) mod starred_tabs;
-mod starred_zone;
 mod startup_directory;
 mod tab_grouping;
 pub(crate) mod tab_unread;
@@ -5615,7 +5614,12 @@ impl Workspace {
             self.tab_mru_order.retain(|id| *id != pane_group_id);
             self.tab_mru_order.insert(0, pane_group_id);
         }
-        self.reveal_tab_in_vertical_panel(index, ctx);
+        if self.vertical_tabs_panel_open
+            && FeatureFlag::VerticalTabs.is_enabled()
+            && *TabSettings::as_ref(ctx).use_vertical_tabs
+        {
+            self.vertical_tabs_panel.scroll_to_tab(index);
+        }
 
         if self.left_panel_visibility_across_tabs_enabled(ctx) {
             self.reconcile_left_panel_open_for_active_tab(ctx);
