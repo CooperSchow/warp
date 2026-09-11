@@ -64,7 +64,10 @@ pub use one_time_modal_model::OneTimeModalModel;
 pub use registry::WorkspaceRegistry;
 pub use toast_stack::ToastStack;
 
-use crate::workspace::view::starred_tabs::{active_tab_is_starred, starred_tabs_enabled};
+use crate::workspace::view::starred_tabs::{
+    active_tab_bulk_close_description, active_tab_star_description, starred_tabs_enabled,
+    PaletteBulkClose,
+};
 use crate::workspace::view::tab_unread::active_tab_is_unread;
 use crate::workspace::view::{
     JUMP_TO_NEXT_UNREAD_TAB_BINDING_NAME, LEFT_PANEL_AGENT_CONVERSATIONS_BINDING_NAME,
@@ -1121,9 +1124,8 @@ pub fn init(app: &mut AppContext) {
         .with_mac_key_binding("cmd-ctrl-u"),
         EditableBinding::new(
             TOGGLE_ACTIVE_TAB_STAR_BINDING_NAME,
-            BindingDescription::new("Star current tab").with_dynamic_override(|ctx| {
-                active_tab_is_starred(ctx).then(|| "unstar current tab".into())
-            }),
+            BindingDescription::new("Star current tab")
+                .with_dynamic_override(active_tab_star_description),
             WorkspaceAction::ToggleActiveTabStar,
         )
         .with_enabled(starred_tabs_enabled)
@@ -1173,8 +1175,12 @@ pub fn init(app: &mut AppContext) {
         ),
         EditableBinding::new(
             "workspace:close_other_tabs",
-            BindingDescription::new("Close other tabs").with_dynamic_override(|_| {
-                starred_tabs_enabled().then(|| "close other tabs (keep starred)".into())
+            BindingDescription::new("Close other tabs").with_dynamic_override(|ctx| {
+                active_tab_bulk_close_description(
+                    "close other tabs",
+                    PaletteBulkClose::OtherTabs,
+                    ctx,
+                )
             }),
             WorkspaceAction::CloseNonActiveTabs,
         )
@@ -1184,13 +1190,16 @@ pub fn init(app: &mut AppContext) {
         EditableBinding::new(
             "workspace:close_tabs_right_active_tab",
             BindingDescription::new("Close tabs to the right").with_dynamic_override(|ctx| {
-                let description = match (uses_vertical_tabs(ctx), starred_tabs_enabled()) {
-                    (false, false) => return None,
-                    (true, false) => "close tabs below",
-                    (false, true) => "close tabs to the right (keep starred)",
-                    (true, true) => "close tabs below (keep starred)",
+                // Upstream's vertical wording, plus "(keep starred)" when the
+                // close would spare a starred tab.
+                let vertical = uses_vertical_tabs(ctx);
+                let label = if vertical {
+                    "close tabs below"
+                } else {
+                    "close tabs to the right"
                 };
-                Some(description.into())
+                active_tab_bulk_close_description(label, PaletteBulkClose::TabsAfter, ctx)
+                    .or_else(|| vertical.then(|| label.into()))
             }),
             WorkspaceAction::CloseTabsRightActiveTab,
         )

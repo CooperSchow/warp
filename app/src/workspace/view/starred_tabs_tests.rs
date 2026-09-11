@@ -11,15 +11,20 @@ use warpui::image_cache::{
     AnimatedImageBehavior, CacheOption, FitType, Image, ImageCache, StaticImage,
 };
 use warpui::{
-    App, AppContext, Presenter, SingletonEntity as _, TypedActionView as _, ViewHandle,
+    App, AppContext, EntityId, Presenter, SingletonEntity as _, TypedActionView as _, ViewHandle,
     WindowInvalidation,
 };
 
-use super::{row_shows_star, shows_pin_overlay, starred_divider_position};
+use super::{
+    bulk_close_description, row_shows_star, shows_pin_overlay, star_description,
+    starred_divider_position, PaletteBulkClose,
+};
 use crate::appearance::Appearance;
 use crate::features::FeatureFlag;
+use crate::menu::MenuItem;
 use crate::pane_group::Direction;
 use crate::tab::tab_position_id;
+use crate::undo_close::UndoCloseStack;
 use crate::workspace::tab_settings::{
     TabSettings, VerticalTabsDisplayGranularity, VerticalTabsTabItemMode, VerticalTabsViewMode,
 };
@@ -143,9 +148,9 @@ impl Layout {
     }
 }
 
-/// Every layout whose rows the star leads: the vertical panel's compact rows
-/// (Cooper's), expanded rows and Summary cards, each pane's row, and the
-/// horizontal tab bar.
+/// Every layout whose rows the star leads: the vertical panel's compact rows,
+/// expanded rows and Summary cards, each pane's row, and the horizontal tab
+/// bar.
 const LAYOUTS: [Layout; 6] = [
     Layout::vertical(
         "compact tab rows",
@@ -458,4 +463,491 @@ fn with_stars_off_pinned_tabs_paint_as_upstream_does() {
             );
         }
     });
+}
+
+/// The tabs' pane-group ids, in list order.
+fn tab_ids(workspace: &Workspace) -> Vec<EntityId> {
+    workspace
+        .tabs
+        .iter()
+        .map(|tab| tab.pane_group.id())
+        .collect()
+}
+
+fn workspace_with_tabs(app: &mut App, count: usize) -> ViewHandle<Workspace> {
+    let workspace = mock_workspace(app);
+    workspace.update(app, |workspace, ctx| {
+        while workspace.tab_count() < count {
+            workspace.add_terminal_tab(false, ctx);
+        }
+    });
+    workspace
+}
+
+fn star(pane_group_id: EntityId, starred: bool) -> WorkspaceAction {
+    WorkspaceAction::SetTabStarred {
+        pane_group_id,
+        starred,
+    }
+}
+
+/// The action behind the star item of the menu for the tab at `index`.
+fn star_item_action(workspace: &Workspace, index: usize, ctx: &AppContext) -> WorkspaceAction {
+    let items = workspace.tabs[index].menu_items(
+        index,
+        workspace.tabs.len(),
+        workspace.starred_boundary(),
+        &workspace.tab_groups,
+        false,
+        index > 0,
+        index + 1 < workspace.tabs.len(),
+        ctx,
+    );
+    items
+        .iter()
+        .find_map(|item| match item {
+            MenuItem::Item(fields) if fields.label().contains("tar tab") => {
+                fields.on_select_action().cloned()
+            }
+            _ => None,
+        })
+        .expect("the tab menu has a star item")
+}
+
+/// A star acts on the tab its action names, wherever that tab has moved since
+/// the menu opened. Asking for the state a tab already has, or naming a tab that
+/// has since closed, changes nothing.
+#[test]
+fn a_star_follows_its_tab_and_repeating_it_changes_nothing() {
+    let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
+    let _stars = FeatureFlag::StarredTabs.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = workspace_with_tabs(&mut app, 4);
+        workspace.update(&mut app, |workspace, ctx| {
+            let [a, b, c, d] = <[EntityId; 4]>::try_from(tab_ids(workspace)).unwrap();
+
+            workspace.handle_action(&star(c, true), ctx);
+            assert_eq!(tab_ids(workspace), [c, a, b, d]);
+            assert!(workspace.tabs[0].pinned);
+
+            // Again, and an unstar of a tab that isn't starred: no change.
+            workspace.handle_action(&star(c, true), ctx);
+            workspace.handle_action(&star(d, false), ctx);
+            assert_eq!(tab_ids(workspace), [c, a, b, d]);
+            assert_eq!(workspace.starred_boundary(), 1);
+
+            // A menu opened on d, then d moved up before the click: the click
+            // still stars d.
+            let click = star_item_action(workspace, 3, ctx);
+            workspace.handle_action(&WorkspaceAction::MoveTabLeft(3), ctx);
+            assert_eq!(tab_ids(workspace), [c, a, d, b]);
+            workspace.handle_action(&click, ctx);
+            assert_eq!(tab_ids(workspace), [c, d, a, b]);
+            assert_eq!(workspace.starred_boundary(), 2);
+
+            // A tab that has since closed.
+            workspace.handle_action(&WorkspaceAction::CloseTab(3), ctx);
+            assert_eq!(tab_ids(workspace), [c, d, a]);
+            workspace.handle_action(&star(b, true), ctx);
+            assert_eq!(tab_ids(workspace), [c, d, a]);
+            assert_eq!(workspace.starred_boundary(), 2);
+        });
+    });
+}
+
+/// Ctrl-Cmd-S stars the active tab, which stays active as it moves to the top,
+/// and pressing it again unstars it, still active.
+#[test]
+fn the_star_key_keeps_the_active_tab_active() {
+    let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
+    let _stars = FeatureFlag::StarredTabs.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = workspace_with_tabs(&mut app, 4);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::ActivateTab(2), ctx);
+            let active = workspace.tabs[2].pane_group.id();
+
+            workspace.handle_action(&WorkspaceAction::ToggleActiveTabStar, ctx);
+            assert_eq!(workspace.tabs[0].pane_group.id(), active);
+            assert!(workspace.tabs[0].pinned);
+            assert_eq!(workspace.active_tab_index, 0);
+
+            workspace.handle_action(&WorkspaceAction::ToggleActiveTabStar, ctx);
+            assert!(workspace.tabs.iter().all(|tab| !tab.pinned));
+            assert_eq!(
+                workspace.tabs[workspace.active_tab_index].pane_group.id(),
+                active
+            );
+        });
+    });
+}
+
+/// With pins on but stars off, the star actions do nothing.
+#[test]
+fn the_star_actions_do_nothing_with_stars_off() {
+    let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
+    let _stars = FeatureFlag::StarredTabs.override_enabled(false);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = workspace_with_tabs(&mut app, 3);
+        workspace.update(&mut app, |workspace, ctx| {
+            let before = tab_ids(workspace);
+            workspace.handle_action(&star(before[2], true), ctx);
+            workspace.handle_action(&WorkspaceAction::ToggleActiveTabStar, ctx);
+            assert_eq!(tab_ids(workspace), before);
+            assert!(workspace.tabs.iter().all(|tab| !tab.pinned));
+        });
+    });
+}
+
+/// The palette's words for Ctrl-Cmd-S follow the active tab as the menu's do,
+/// and its bulk closes say "(keep starred)" exactly when they would spare a
+/// starred tab.
+#[test]
+fn the_palette_says_what_the_star_and_bulk_close_keys_will_do() {
+    let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
+    let _stars = FeatureFlag::StarredTabs.override_enabled(true);
+    let _groups = FeatureFlag::GroupedTabs.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = workspace_with_tabs(&mut app, 4);
+        workspace.update(&mut app, |workspace, ctx| {
+            let others = |workspace: &Workspace| {
+                bulk_close_description(workspace, "close other tabs", PaletteBulkClose::OtherTabs)
+            };
+            let below = |workspace: &Workspace| {
+                bulk_close_description(workspace, "close tabs below", PaletteBulkClose::TabsAfter)
+            };
+
+            workspace.handle_action(&WorkspaceAction::ActivateTab(3), ctx);
+            assert_eq!(star_description(workspace), None);
+            assert_eq!(others(workspace).as_deref(), Some("close other tabs"));
+            assert_eq!(below(workspace), None, "nothing below the last tab");
+
+            // The active tab starred: it moves to the top.
+            workspace.handle_action(&WorkspaceAction::ToggleActiveTabStar, ctx);
+            assert_eq!(
+                star_description(workspace).as_deref(),
+                Some("unstar current tab")
+            );
+            assert_eq!(others(workspace).as_deref(), Some("close other tabs"));
+            assert_eq!(below(workspace).as_deref(), Some("close tabs below"));
+
+            // A second starred tab, below the active one.
+            let second = workspace.tabs[1].pane_group.id();
+            workspace.handle_action(&star(second, true), ctx);
+            assert_eq!(
+                others(workspace).as_deref(),
+                Some("close other tabs (keep starred)")
+            );
+            assert_eq!(
+                below(workspace).as_deref(),
+                Some("close tabs below (keep starred)")
+            );
+
+            // An unstarred, grouped active tab: starring pulls it out.
+            workspace.handle_action(&WorkspaceAction::ActivateTab(3), ctx);
+            workspace.handle_action(&WorkspaceAction::NewTabGroupFromTab(3), ctx);
+            assert_eq!(
+                star_description(workspace).as_deref(),
+                Some("star current tab (leaves group)")
+            );
+            assert_eq!(below(workspace), None);
+            assert_eq!(
+                others(workspace).as_deref(),
+                Some("close other tabs (keep starred)")
+            );
+        });
+    });
+}
+
+/// Every bulk close, from every tab of every list of up to five tabs with every
+/// length of starred block: it closes exactly the unstarred tabs in its range,
+/// and never a starred one.
+#[test]
+fn bulk_closes_never_close_a_starred_tab() {
+    let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
+    let _stars = FeatureFlag::StarredTabs.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let mut cases = 0;
+        for tab_count in 1..=5 {
+            for starred in 0..=tab_count {
+                for index in 0..tab_count {
+                    for close in [
+                        WorkspaceAction::CloseOtherTabs(index),
+                        WorkspaceAction::CloseTabsRight(index),
+                        WorkspaceAction::CloseNonActiveTabs,
+                        WorkspaceAction::CloseTabsRightActiveTab,
+                    ] {
+                        let workspace = workspace_with_tabs(&mut app, tab_count);
+                        workspace.update(&mut app, |workspace, ctx| {
+                            let ids = tab_ids(workspace);
+                            for id in &ids[..starred] {
+                                workspace.handle_action(&star(*id, true), ctx);
+                            }
+                            assert_eq!(tab_ids(workspace), ids);
+                            workspace.handle_action(&WorkspaceAction::ActivateTab(index), ctx);
+                            let closes_both_sides = matches!(
+                                close,
+                                WorkspaceAction::CloseOtherTabs(_)
+                                    | WorkspaceAction::CloseNonActiveTabs
+                            );
+                            let survivors: Vec<EntityId> = ids
+                                .iter()
+                                .enumerate()
+                                .filter(|(i, _)| {
+                                    *i < starred
+                                        || *i == index
+                                        || (!closes_both_sides && *i < index)
+                                })
+                                .map(|(_, id)| *id)
+                                .collect();
+                            workspace.handle_action(&close, ctx);
+                            assert_eq!(
+                                tab_ids(workspace),
+                                survivors,
+                                "{close:?} from tab {index} of {tab_count}, {starred} starred"
+                            );
+                        });
+                        cases += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 280);
+    });
+}
+
+/// A small deterministic generator, so a failing run replays from its seed.
+struct Rng(u64);
+
+impl Rng {
+    fn below(&mut self, bound: usize) -> usize {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 % bound as u64) as usize
+    }
+}
+
+/// One step of the zone sweep: everything that stars, moves, adds, closes,
+/// reopens, groups or jumps between tabs.
+#[derive(Clone, Copy, Debug)]
+enum Step {
+    Star(usize),
+    Unstar(usize),
+    ToggleActive,
+    Activate(usize),
+    MoveUp(usize),
+    MoveDown(usize),
+    Add,
+    Close(usize),
+    Reopen,
+    NewGroup(usize),
+    JoinGroup(usize),
+    LeaveGroup(usize),
+    StarGroup(usize),
+    UnstarGroup(usize),
+    CloseOthers(usize),
+    CloseBelow(usize),
+    CloseNonActive,
+    CloseBelowActive,
+    MarkUnread(usize),
+    JumpToNextUnread,
+}
+
+impl Step {
+    fn random(rng: &mut Rng, tab_count: usize) -> Self {
+        let tab = rng.below(tab_count);
+        match rng.below(20) {
+            0 => Step::Star(tab),
+            1 => Step::Unstar(tab),
+            2 => Step::ToggleActive,
+            3 => Step::Activate(tab),
+            4 => Step::MoveUp(tab),
+            5 => Step::MoveDown(tab),
+            6 if tab_count < 7 => Step::Add,
+            7 if tab_count > 1 => Step::Close(tab),
+            8 => Step::Reopen,
+            9 => Step::NewGroup(tab),
+            10 => Step::JoinGroup(tab),
+            11 => Step::LeaveGroup(tab),
+            12 => Step::StarGroup(tab),
+            13 => Step::UnstarGroup(tab),
+            14 => Step::CloseOthers(tab),
+            15 => Step::CloseBelow(tab),
+            16 => Step::CloseNonActive,
+            17 => Step::CloseBelowActive,
+            18 => Step::MarkUnread(tab),
+            19 => Step::JumpToNextUnread,
+            _ => Step::Star(tab),
+        }
+    }
+
+    /// Whether the step leaves the same tab active. Activating, adding,
+    /// reopening and jumping move focus by design, and so does a new group,
+    /// which upstream activates.
+    fn keeps_the_active_tab(self) -> bool {
+        !matches!(
+            self,
+            Step::Activate(_)
+                | Step::Add
+                | Step::Reopen
+                | Step::JumpToNextUnread
+                | Step::NewGroup(_)
+        ) && !self.closes()
+    }
+
+    fn closes(self) -> bool {
+        matches!(self, Step::Close(_)) || self.bulk_closes()
+    }
+
+    fn bulk_closes(self) -> bool {
+        matches!(
+            self,
+            Step::CloseOthers(_)
+                | Step::CloseBelow(_)
+                | Step::CloseNonActive
+                | Step::CloseBelowActive
+        )
+    }
+
+    /// The workspace action this step dispatches, if it is one and it applies.
+    fn action(self, workspace: &Workspace) -> Option<WorkspaceAction> {
+        let id = |index: usize| workspace.tabs[index].pane_group.id();
+        let group = |index: usize| workspace.tabs[index].group_id;
+        Some(match self {
+            Step::Star(index) => star(id(index), true),
+            Step::Unstar(index) => star(id(index), false),
+            Step::ToggleActive => WorkspaceAction::ToggleActiveTabStar,
+            Step::Activate(index) => WorkspaceAction::ActivateTab(index),
+            Step::MoveUp(index) => WorkspaceAction::MoveTabLeft(index),
+            Step::MoveDown(index) => WorkspaceAction::MoveTabRight(index),
+            Step::Close(index) => WorkspaceAction::CloseTab(index),
+            Step::NewGroup(index) => WorkspaceAction::NewTabGroupFromTab(index),
+            Step::JoinGroup(index) => {
+                let group_id = workspace
+                    .tabs
+                    .iter()
+                    .filter_map(|tab| tab.group_id)
+                    .find(|group_id| group(index) != Some(*group_id))?;
+                WorkspaceAction::MoveTabToGroup {
+                    tab_index: index,
+                    group_id,
+                }
+            }
+            Step::LeaveGroup(index) => WorkspaceAction::RemoveTabFromGroup(index),
+            Step::StarGroup(index) => WorkspaceAction::PinTabGroup(group(index)?),
+            Step::UnstarGroup(index) => WorkspaceAction::UnpinTabGroup(group(index)?),
+            Step::CloseOthers(index) => WorkspaceAction::CloseOtherTabs(index),
+            Step::CloseBelow(index) => WorkspaceAction::CloseTabsRight(index),
+            Step::CloseNonActive => WorkspaceAction::CloseNonActiveTabs,
+            Step::CloseBelowActive => WorkspaceAction::CloseTabsRightActiveTab,
+            Step::MarkUnread(index) => WorkspaceAction::SetTabUnread {
+                pane_group_id: id(index),
+                terminal_view_id: None,
+                unread: true,
+            },
+            Step::JumpToNextUnread => WorkspaceAction::JumpToNextUnreadTab,
+            Step::Add | Step::Reopen => return None,
+        })
+    }
+}
+
+/// What the zone sweep checks a step against.
+struct Before {
+    active: EntityId,
+    starred: Vec<EntityId>,
+}
+
+/// Seeded runs of 200 steps each: after every step the starred tabs are one
+/// block at the top of the list, no tab is both starred and grouped, the active
+/// tab is the same tab unless the step closed it or was meant to move focus, and
+/// no bulk close took a starred tab with it.
+#[test]
+fn starred_tabs_stay_one_block_at_the_top_through_any_sequence() {
+    let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
+    let _stars = FeatureFlag::StarredTabs.override_enabled(true);
+    let _unread = FeatureFlag::TabMarkUnread.override_enabled(true);
+    let _groups = FeatureFlag::GroupedTabs.override_enabled(true);
+
+    for seed in 1..=8u64 {
+        App::test((), |mut app| async move {
+            initialize_app(&mut app);
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let workspace = workspace_with_tabs(&mut app, 3);
+            for step_number in 0..200 {
+                let (step, before) = workspace.read(&app, |workspace, _| {
+                    let step = Step::random(&mut rng, workspace.tabs.len());
+                    let before = Before {
+                        active: workspace.tabs[workspace.active_tab_index].pane_group.id(),
+                        starred: workspace
+                            .tabs
+                            .iter()
+                            .filter(|tab| workspace.is_tab_effectively_pinned(tab))
+                            .map(|tab| tab.pane_group.id())
+                            .collect(),
+                    };
+                    (step, before)
+                });
+                match step {
+                    Step::Add => workspace.update(&mut app, |workspace, ctx| {
+                        workspace.add_terminal_tab(false, ctx);
+                    }),
+                    Step::Reopen => UndoCloseStack::handle(&app)
+                        .update(&mut app, |stack, ctx| stack.undo_close(ctx)),
+                    _ => workspace.update(&mut app, |workspace, ctx| {
+                        if let Some(action) = step.action(workspace) {
+                            workspace.handle_action(&action, ctx);
+                        }
+                    }),
+                }
+                workspace.read(&app, |workspace, _| {
+                    let context = format!("seed {seed}, step {step_number} ({step:?})");
+                    let ids = tab_ids(workspace);
+                    assert!(
+                        !ids.is_empty() && workspace.active_tab_index < ids.len(),
+                        "{context}"
+                    );
+                    let starred: Vec<bool> = workspace
+                        .tabs
+                        .iter()
+                        .map(|tab| workspace.is_tab_effectively_pinned(tab))
+                        .collect();
+                    assert!(
+                        starred.windows(2).all(|pair| pair[0] || !pair[1]),
+                        "{context}: the starred tabs must lead the list as one block, \
+                         got {starred:?}"
+                    );
+                    assert!(
+                        workspace
+                            .tabs
+                            .iter()
+                            .all(|tab| !(tab.pinned && tab.group_id.is_some())),
+                        "{context}: a tab is both starred and grouped"
+                    );
+                    let active = ids[workspace.active_tab_index];
+                    if step.keeps_the_active_tab()
+                        || (step.closes() && ids.contains(&before.active))
+                    {
+                        assert_eq!(active, before.active, "{context}: the active tab changed");
+                    }
+                    if step.bulk_closes() {
+                        assert!(
+                            before.starred.iter().all(|id| ids.contains(id)),
+                            "{context}: a bulk close took a starred tab"
+                        );
+                    }
+                });
+            }
+        });
+    }
 }

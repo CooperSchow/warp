@@ -700,6 +700,16 @@ fn test_sqlite_round_trips_tab_groups() {
     assert_eq!(restored_window.tabs[1].group_id, None);
 }
 
+/// Starring is pinning: the pinned-state round trip holds unchanged with stars
+/// on, when the save also mirrors stars into `pane_marks` and the read repairs
+/// the starred block.
+#[test]
+fn test_sqlite_round_trips_pinned_state_with_stars_on() {
+    let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
+    let _stars = FeatureFlag::StarredTabs.override_enabled(true);
+    test_sqlite_round_trips_pinned_state();
+}
+
 /// Verifies that the `pinned` flag on tabs and tab groups round-trips through
 /// save/restore so the user's pinned layout survives an app restart.
 #[test]

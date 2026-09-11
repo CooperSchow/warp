@@ -2,14 +2,17 @@ use std::collections::HashMap;
 
 use settings::Setting as _;
 use warp_errors::report_if_error;
+use warpui::platform::OperatingSystem;
 use warpui::{App, AppContext, SingletonEntity as _};
 
 use super::{bulk_close_label, tab_group_menu_entry_flags, PaneNameMenuTarget};
 use crate::features::FeatureFlag;
 use crate::menu::MenuItem;
+use crate::util::bindings::keybinding_name_to_display_string;
 use crate::workspace::tab_group::{TabGroup, TabGroupId};
 use crate::workspace::tab_settings::{TabSettings, VerticalTabsDisplayGranularity};
 use crate::workspace::view::tests::{initialize_app, mock_workspace};
+use crate::workspace::view::TOGGLE_ACTIVE_TAB_STAR_BINDING_NAME;
 use crate::workspace::{PaneViewLocator, Workspace, WorkspaceAction};
 
 /// Build a `tab_groups` map containing exactly the given group ids.
@@ -281,4 +284,126 @@ fn bulk_closes_spare_starred_tabs_and_say_so() {
     // Only starred tabs in range, so the close would do nothing: hidden.
     assert_eq!(bulk_close_label("Close other tabs", [1], 2), None);
     assert_eq!(bulk_close_label("Close Tabs Below", 4..4, 2), None);
+}
+
+/// Every tab's menu in every list of up to eight tabs, with every length of
+/// starred block, in both tab bars: each bulk close shows exactly when it would
+/// close a tab, and says "(keep starred)" exactly when it would spare one.
+#[test]
+fn bulk_close_items_across_every_small_tab_list() {
+    let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
+    let _stars = FeatureFlag::StarredTabs.override_enabled(true);
+    let _unread = FeatureFlag::TabMarkUnread.override_enabled(false);
+    let _vertical_tabs = FeatureFlag::VerticalTabs.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let mut menus = 0;
+        for vertical in [false, true] {
+            TabSettings::handle(&app).update(&mut app, |settings, ctx| {
+                report_if_error!(settings.use_vertical_tabs.set_value(vertical, ctx));
+            });
+            let close_after = if vertical {
+                "Close Tabs Below"
+            } else {
+                "Close Tabs to the Right"
+            };
+            workspace.read(&app, |workspace, ctx| {
+                for tab_count in 1..=8usize {
+                    for starred in 0..=tab_count {
+                        for index in 0..tab_count {
+                            let items = workspace.tabs[0].menu_items(
+                                index,
+                                tab_count,
+                                starred,
+                                &HashMap::new(),
+                                false,
+                                index > 0,
+                                index + 1 < tab_count,
+                                ctx,
+                            );
+                            let labels = menu_labels(&items);
+                            let others: Vec<usize> =
+                                (0..tab_count).filter(|other| *other != index).collect();
+                            let after: Vec<usize> = (index + 1..tab_count).collect();
+                            for (label, range) in
+                                [("Close other tabs", others), (close_after, after)]
+                            {
+                                let closes = range.iter().any(|tab| *tab >= starred);
+                                let spares = range.iter().any(|tab| *tab < starred);
+                                let expected: Vec<String> = closes
+                                    .then(|| {
+                                        if spares {
+                                            format!("{label} (keep starred)")
+                                        } else {
+                                            label.to_owned()
+                                        }
+                                    })
+                                    .into_iter()
+                                    .collect();
+                                let shown: Vec<String> = labels
+                                    .iter()
+                                    .filter(|shown| shown.starts_with(label))
+                                    .cloned()
+                                    .collect();
+                                assert_eq!(
+                                    shown, expected,
+                                    "tab {index} of {tab_count}, {starred} starred, vertical \
+                                     {vertical}"
+                                );
+                            }
+                            menus += 1;
+                        }
+                    }
+                }
+            });
+        }
+        assert_eq!(menus, 480);
+    });
+}
+
+/// The star item reads "Star tab", "Star tab (leaves group)" or "Unstar tab"
+/// from the tab's own state, with the star key as the keymap has it for a hint.
+#[test]
+fn the_star_item_follows_the_tab_and_hints_the_live_key() {
+    let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
+    let _stars = FeatureFlag::StarredTabs.override_enabled(true);
+    let _unread = FeatureFlag::TabMarkUnread.override_enabled(false);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let hint = keybinding_name_to_display_string(TOGGLE_ACTIVE_TAB_STAR_BINDING_NAME, ctx);
+            assert_eq!(
+                hint.is_some(),
+                OperatingSystem::get().is_mac(),
+                "Ctrl-Cmd-S is a macOS default only"
+            );
+            for (pinned, grouped, label) in [
+                (false, false, "Star tab"),
+                (false, true, "Star tab (leaves group)"),
+                (true, false, "Unstar tab"),
+            ] {
+                workspace.tabs[0].pinned = pinned;
+                workspace.tabs[0].group_id = grouped.then(TabGroupId::new);
+                let items = workspace.tabs[0].menu_items(
+                    0,
+                    1,
+                    usize::from(pinned),
+                    &HashMap::new(),
+                    false,
+                    false,
+                    false,
+                    ctx,
+                );
+                let MenuItem::Item(fields) = &items[0] else {
+                    panic!("the menu opens with the star item");
+                };
+                assert_eq!(fields.label(), label);
+                assert_eq!(fields.key_shortcut_label(), hint.as_deref(), "{label}");
+            }
+        });
+    });
 }

@@ -12,6 +12,7 @@ use warpui::{AppContext, EntityId, SingletonEntity, ViewContext};
 
 use super::Workspace;
 use crate::features::FeatureFlag;
+use crate::tab::bulk_close_label;
 use crate::workspace::WorkspaceRegistry;
 
 /// The star's box: about a 12 px title's cap height, plus the overshoot a
@@ -31,21 +32,6 @@ pub(crate) const STAR_SLOT_WIDTH: f32 = STAR_SIZE + STAR_TITLE_GAP;
 /// of it, both.
 pub(crate) fn starred_tabs_enabled() -> bool {
     FeatureFlag::PinnedTabs.is_enabled() && FeatureFlag::StarredTabs.is_enabled()
-}
-
-/// Whether the active window's active tab is starred, for the palette's
-/// "Star current tab" / "Unstar current tab" entry.
-pub(crate) fn active_tab_is_starred(ctx: &AppContext) -> bool {
-    ctx.windows()
-        .active_window()
-        .and_then(|window_id| WorkspaceRegistry::as_ref(ctx).get(window_id, ctx))
-        .is_some_and(|workspace| {
-            let workspace = workspace.as_ref(ctx);
-            workspace
-                .tabs
-                .get(workspace.active_tab_index)
-                .is_some_and(|tab| tab.pinned)
-        })
 }
 
 /// The star, in `ink`. It's only a mark, with no hover state and no click of
@@ -111,21 +97,127 @@ pub(super) fn starred_divider_position(
     None
 }
 
+/// Runs `read` on the active window's workspace. The palette's labels read
+/// the tab a key would act on through it.
+fn with_active_workspace<T>(ctx: &AppContext, read: impl FnOnce(&Workspace) -> T) -> Option<T> {
+    let window_id = ctx.windows().active_window()?;
+    let workspace = WorkspaceRegistry::as_ref(ctx).get(window_id, ctx)?;
+    Some(read(workspace.as_ref(ctx)))
+}
+
+/// The palette's words for ⌃⌘S on the active window's active tab, which follow
+/// the tab menu's: "unstar current tab" on a starred tab, and "(leaves group)"
+/// when starring pulls the tab out of its group. `None` keeps "Star current
+/// tab".
+pub(crate) fn active_tab_star_description(ctx: &AppContext) -> Option<String> {
+    with_active_workspace(ctx, star_description).flatten()
+}
+
+/// The words `active_tab_star_description` gives `workspace`'s active tab.
+pub(super) fn star_description(workspace: &Workspace) -> Option<String> {
+    let tab = workspace.tabs.get(workspace.active_tab_index)?;
+    let description = match (tab.pinned, tab.group_id.is_some()) {
+        (true, _) => "unstar current tab",
+        (false, true) => "star current tab (leaves group)",
+        (false, false) => return None,
+    };
+    Some(description.to_owned())
+}
+
+/// A bulk close the palette runs on the active tab.
+#[derive(Clone, Copy)]
+pub(crate) enum PaletteBulkClose {
+    /// Every tab but the active one.
+    OtherTabs,
+    /// The tabs after the active one: below it, or to its right in the
+    /// horizontal tab bar.
+    TabsAfter,
+}
+
+/// The palette's label for a bulk close on the active window's active tab:
+/// `label`, with "(keep starred)" exactly when the close would spare a starred
+/// tab, by the tab menu's own rule. `None` when there's no active workspace or
+/// the close would close nothing, which leaves the binding's own wording.
+pub(crate) fn active_tab_bulk_close_description(
+    label: &str,
+    close: PaletteBulkClose,
+    ctx: &AppContext,
+) -> Option<String> {
+    with_active_workspace(ctx, |workspace| {
+        bulk_close_description(workspace, label, close)
+    })
+    .flatten()
+}
+
+/// The label `active_tab_bulk_close_description` gives `workspace`'s active tab.
+pub(super) fn bulk_close_description(
+    workspace: &Workspace,
+    label: &str,
+    close: PaletteBulkClose,
+) -> Option<String> {
+    let active = workspace.active_tab_index;
+    let tab_count = workspace.tabs.len();
+    let starred_boundary = workspace.starred_boundary();
+    match close {
+        PaletteBulkClose::OtherTabs => bulk_close_label(
+            label,
+            (0..tab_count).filter(|index| *index != active),
+            starred_boundary,
+        ),
+        PaletteBulkClose::TabsAfter => {
+            bulk_close_label(label, active + 1..tab_count, starred_boundary)
+        }
+    }
+}
+
 impl Workspace {
-    /// Stars or unstars the tab that owns `pane_group_id`. Resolving the tab by
-    /// identity rather than index keeps a menu opened before the tabs moved
-    /// acting on the tab it was opened for. A no-op when that tab has since
-    /// closed or already has the requested state.
+    /// Stars or unstars the tab that owns `pane_group_id`, through upstream's
+    /// pin, which moves it to the end of the starred block or just past it, and
+    /// saves. Resolving the tab by identity rather than index keeps a menu
+    /// opened before the tabs moved acting on the tab it was opened for. A no-op
+    /// without stars, when that tab has since closed, or when it already has the
+    /// requested state.
     pub(super) fn set_tab_starred(
         &mut self,
-        _pane_group_id: EntityId,
-        _starred: bool,
-        _ctx: &mut ViewContext<Self>,
+        pane_group_id: EntityId,
+        starred: bool,
+        ctx: &mut ViewContext<Self>,
     ) {
+        if !starred_tabs_enabled() {
+            return;
+        }
+        let Some(index) = self.tab_index_of(pane_group_id) else {
+            return;
+        };
+        if self.tabs[index].pinned == starred {
+            return;
+        }
+        if starred {
+            self.pin_tab(index, ctx);
+        } else {
+            self.unpin_tab(index, ctx);
+        }
+        // The tab moved; keep it in view where it landed.
+        if let Some(index) = self.tab_index_of(pane_group_id) {
+            self.reveal_tab_in_vertical_panel(index, ctx);
+        }
     }
 
     /// Stars the active tab, or unstars it if it's starred.
-    pub(super) fn toggle_active_tab_star(&mut self, _ctx: &mut ViewContext<Self>) {}
+    pub(super) fn toggle_active_tab_star(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(tab) = self.tabs.get(self.active_tab_index) else {
+            return;
+        };
+        let (pane_group_id, starred) = (tab.pane_group.id(), tab.pinned);
+        self.set_tab_starred(pane_group_id, !starred, ctx);
+    }
+
+    /// The index of the open tab that owns `pane_group_id`.
+    fn tab_index_of(&self, pane_group_id: EntityId) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|tab| tab.pane_group.id() == pane_group_id)
+    }
 
     /// How many tabs lead the list as starred, which the close menus promise
     /// to spare. Zero when stars are off.

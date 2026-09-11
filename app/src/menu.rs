@@ -931,6 +931,11 @@ impl<A: Action + Clone> MenuItemFields<A> {
         self.element.label().unwrap_or_default()
     }
 
+    /// The keyboard shortcut shown beside the label, if the item has one.
+    pub fn key_shortcut_label(&self) -> Option<&str> {
+        self.key_shortcut_label.as_deref()
+    }
+
     pub fn is_disabled(&self) -> bool {
         self.disabled
     }

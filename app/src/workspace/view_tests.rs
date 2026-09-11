@@ -4349,6 +4349,15 @@ fn test_pin_tab_on_grouped_tab_extracts_then_pins() {
     });
 }
 
+/// Starring is pinning: upstream's pin tests hold unchanged with stars on.
+#[test]
+fn upstream_pin_tests_pass_with_stars_on() {
+    let _stars = FeatureFlag::StarredTabs.override_enabled(true);
+    test_pin_unpin_ungrouped_tab_moves_to_and_from_boundary();
+    test_pin_unpin_tab_group_moves_block_without_syncing_members();
+    test_pin_tab_on_grouped_tab_extracts_then_pins();
+}
+
 /// Regression for the tools-panel tab visibility toggles surfaced in the
 /// Appearance settings page: toggling a tab's backing setting must add/remove
 /// that tab from the tools panel live, and re-enabling Warp Drive must make it
