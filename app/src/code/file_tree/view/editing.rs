@@ -5,6 +5,8 @@
 mod tests;
 
 use std::cmp::Ordering;
+use std::io;
+use std::path::Path;
 use std::sync::Arc;
 
 use repo_metadata::file_tree_store::FileTreeEntryState;
@@ -14,6 +16,7 @@ use warpui::elements::MouseStateHandle;
 use warpui::ViewContext;
 
 use super::{FileTreeIdentifier, FileTreeItem, FileTreeView};
+use crate::code::file_tree::delete_confirmation_dialog::ItemIdentity;
 use crate::code::file_tree::view::{PendingEdit, PendingEditKind};
 use crate::code::file_tree::FileTreeEvent;
 use crate::send_telemetry_from_ctx;
@@ -69,6 +72,45 @@ pub(super) fn sort_entries_for_file_tree(
         (true, false) => Ordering::Less,
         (false, true) => Ordering::Greater,
         _ => alphanumeric_sort::compare_str(name_1, name_2),
+    }
+}
+
+/// Why renaming `old_path` to `new_path` mustn't go ahead, if it mustn't: another item already
+/// has the new name, or there's no telling whether one does. Renaming to the same name goes
+/// ahead, and so does a change of case alone on a disk that treats both spellings as one name
+/// (as macOS and Windows do by default), because the item "already there" is the one being
+/// renamed.
+///
+/// This runs just before the rename, so an item created in the moment between the two would
+/// still be replaced.
+fn rename_refusal(old_path: &Path, new_path: &Path) -> Option<String> {
+    if old_path == new_path {
+        return None;
+    }
+    let file_name = |path: &Path| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string())
+    };
+    let (old_name, new_name) = (file_name(old_path), file_name(new_path));
+
+    // `lstat`, so a symbolic link counts as taken even when it points nowhere.
+    let existing = match std::fs::symlink_metadata(new_path) {
+        Ok(existing) => existing,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+        // Fail closed: when there's no telling whether the name is taken, don't rename.
+        Err(error) => return Some(format!("Couldn't rename \"{old_name}\": {error}")),
+    };
+    let only_case_differs = old_name.to_lowercase() == new_name.to_lowercase();
+    let is_same_item = std::fs::symlink_metadata(old_path).is_ok_and(|old| {
+        ItemIdentity::from_metadata(&old) == ItemIdentity::from_metadata(&existing)
+    });
+    if only_case_differs && is_same_item {
+        None
+    } else {
+        Some(format!(
+            "Couldn't rename \"{old_name}\": \"{new_name}\" already exists."
+        ))
     }
 }
 
@@ -217,6 +259,22 @@ impl FileTreeView {
 
                 let old_path = old_std_path.to_local_path_lossy();
                 let new_path = new_std_path.to_local_path_lossy();
+                // `rename` replaces an item that already has the new name, which would delete it
+                // without a word. Refuse instead, and say why.
+                if let Some(message) = rename_refusal(&old_path, &new_path) {
+                    log::warn!(
+                        "Not renaming {} -> {}: {message}",
+                        old_path.display(),
+                        new_path.display()
+                    );
+                    Self::show_error_toast(
+                        format!("file_tree_rename:{old_std_path}"),
+                        message,
+                        ctx,
+                    );
+                    ctx.notify();
+                    return;
+                }
                 if let Err(e) = std::fs::rename(&old_path, &new_path) {
                     log::warn!(
                         "Failed to rename {} -> {}: {e}",

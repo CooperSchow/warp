@@ -2777,6 +2777,96 @@ fn a_folder_delete_that_stops_partway_says_so_and_drops_what_went() {
     });
 }
 
+/// Renames the item at `path` to `new_name`, the way typing a new name into the file tree's
+/// rename field and pressing Return does.
+fn rename(
+    app: &mut App,
+    view: &ViewHandle<FileTreeView>,
+    root: &Path,
+    path: &Path,
+    new_name: &str,
+) {
+    view.update(app, |view, ctx| {
+        let row = row_of(view, root, path);
+        view.start_rename(&row, ctx);
+        view.editor_view
+            .update(ctx, |editor, ctx| editor.set_buffer_text(new_name, ctx));
+        view.commit_pending_edit(ctx);
+    });
+}
+
+#[test]
+fn rename_refuses_to_replace_an_item_that_has_the_new_name() {
+    VirtualFS::test("file_tree_rename_taken", |dirs, mut vfs| {
+        vfs.mkdir("tree").with_files(vec![
+            Stub::FileWithContent("tree/a.txt", "a\n"),
+            Stub::FileWithContent("tree/b.txt", "b\n"),
+        ]);
+        let tree = dirs.tests().join("tree");
+        let a = tree.join("a.txt");
+        let b = tree.join("b.txt");
+
+        App::test((), |mut app| async move {
+            let _ = initialize_app(&mut app);
+            let (_, view) = open_file_tree(&mut app, &tree);
+            let observer = observe_deletes(&mut app, &view);
+            let before = paths_under(&tree);
+
+            rename(&mut app, &view, &tree, &a, "b.txt");
+
+            assert_eq!(paths_under(&tree), before, "nothing was renamed");
+            assert_eq!(
+                std::fs::read_to_string(&b).expect("b.txt is still there"),
+                "b\n",
+                "b.txt wasn't replaced"
+            );
+            view.read(&app, |view, _| {
+                let paths = flattened_paths(view, &tree);
+                assert!(paths.contains(&std_path(&a)));
+                assert!(paths.contains(&std_path(&b)));
+            });
+            observer.read(&app, |observer, _| {
+                assert_eq!(observer.toasts, 1, "a toast explains why");
+            });
+        });
+    });
+}
+
+#[test]
+fn rename_can_change_only_the_case_of_a_name() {
+    VirtualFS::test("file_tree_rename_case", |dirs, mut vfs| {
+        vfs.mkdir("tree")
+            .with_files(vec![Stub::FileWithContent("tree/notes.txt", "notes\n")]);
+        let tree = dirs.tests().join("tree");
+        let notes = tree.join("notes.txt");
+
+        App::test((), |mut app| async move {
+            let _ = initialize_app(&mut app);
+            let (_, view) = open_file_tree(&mut app, &tree);
+            let observer = observe_deletes(&mut app, &view);
+
+            rename(&mut app, &view, &tree, &notes, "NOTES.txt");
+
+            let names: Vec<String> = std::fs::read_dir(&tree)
+                .expect("the test folder is readable")
+                .map(|entry| {
+                    entry
+                        .expect("the test folder entry is readable")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            assert_eq!(names, ["NOTES.txt"]);
+            assert_eq!(
+                std::fs::read_to_string(tree.join("NOTES.txt")).expect("NOTES.txt is there"),
+                "notes\n"
+            );
+            observer.read(&app, |observer, _| assert_eq!(observer.toasts, 0));
+        });
+    });
+}
+
 #[test]
 fn the_new_file_placeholder_offers_no_delete_and_cant_be_deleted() {
     VirtualFS::test("file_tree_delete_placeholder", |dirs, mut vfs| {
