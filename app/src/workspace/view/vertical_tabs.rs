@@ -718,9 +718,10 @@ pub(super) struct VerticalTabsPanelState {
     new_tab_button_state: MouseStateHandle,
     pub(super) search_query: String,
     /// The search the panel last rendered and the tabs it showed for it, by
-    /// pane group, so ⌘J can keep to them without matching again, which reads
-    /// terminal state under its lock.
-    search_matches: RefCell<Option<(String, Vec<EntityId>)>>,
+    /// pane group, each with the pane rows it showed (`None` where the tab's
+    /// one row stands for the whole tab), so ⌘J can keep to them without
+    /// matching again, which reads terminal state under its lock.
+    search_matches: RefCell<Option<(String, Vec<(EntityId, Option<Vec<PaneId>>)>)>>,
     settings_button_mouse_state: MouseStateHandle,
     panes_segment_mouse_state: MouseStateHandle,
     tabs_segment_mouse_state: MouseStateHandle,
@@ -783,15 +784,22 @@ impl Default for VerticalTabsPanelState {
 }
 
 impl VerticalTabsPanelState {
-    /// Records the tabs a render showed for `query`, by pane group.
-    pub(super) fn record_search_matches(&self, query: &str, pane_group_ids: Vec<EntityId>) {
-        *self.search_matches.borrow_mut() = Some((query.to_owned(), pane_group_ids));
+    /// Records the tabs a render showed for `query`, by pane group, each with
+    /// the pane rows it showed: `Some` in the Panes layout, `None` where the
+    /// tab's one row stands for the whole tab.
+    pub(super) fn record_search_matches(
+        &self,
+        query: &str,
+        matches: Vec<(EntityId, Option<Vec<PaneId>>)>,
+    ) {
+        *self.search_matches.borrow_mut() = Some((query.to_owned(), matches));
     }
 
-    /// The tabs the search shows, by pane group, as of the panel's last render
-    /// for the current query. `None` while no search filters the list, and
-    /// before the panel has rendered the current query.
-    pub(super) fn tabs_matching_search(&self) -> Option<Vec<EntityId>> {
+    /// The tabs the search shows, by pane group, each with the pane rows it
+    /// shows, as of the panel's last render for the current query. `None`
+    /// while no search filters the list, and before the panel has rendered
+    /// the current query.
+    pub(super) fn tabs_matching_search(&self) -> Option<Vec<(EntityId, Option<Vec<PaneId>>)>> {
         if self.search_query.is_empty() {
             return None;
         }
@@ -799,7 +807,7 @@ impl VerticalTabsPanelState {
             .borrow()
             .as_ref()
             .filter(|(query, _)| *query == self.search_query)
-            .map(|(_, pane_group_ids)| pane_group_ids.clone())
+            .map(|(_, matches)| matches.clone())
     }
 
     /// Returns a lightweight handle bundle for workspace-level visibility reconciliation while the
@@ -1918,14 +1926,21 @@ fn render_groups(
             })
             .collect()
     };
-    // ⌘J keeps to the tabs a search shows, and reads them from here rather
-    // than matching again.
+    // ⌘J keeps to the rows a search shows, and reads them from here rather
+    // than matching again: in the Panes layout, a tab's matching panes, and
+    // elsewhere its one row, which stands for the whole tab.
     if !query.is_empty() {
         state.record_search_matches(
             query,
             visible_tabs
                 .iter()
-                .map(|(tab_index, _)| workspace.tabs[*tab_index].pane_group.id())
+                .map(|(tab_index, pane_ids)| {
+                    let rows = match display_granularity {
+                        VerticalTabsDisplayGranularity::Panes => pane_ids.clone(),
+                        VerticalTabsDisplayGranularity::Tabs => None,
+                    };
+                    (workspace.tabs[*tab_index].pane_group.id(), rows)
+                })
                 .collect(),
         );
     }

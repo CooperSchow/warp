@@ -31,6 +31,11 @@ fn set_marks(read: &[EntityId], unread: &[EntityId], ctx: &mut ViewContext<Works
     });
 }
 
+/// A search record in which each tab's one row stands for the whole tab.
+fn whole_tabs(pane_group_ids: &[EntityId]) -> Vec<(EntityId, Option<Vec<PaneId>>)> {
+    pane_group_ids.iter().map(|id| (*id, None)).collect()
+}
+
 /// Adds a terminal pane beside the tab's one, keeps focus on the first, and
 /// returns both panes with their terminal views.
 fn split_tab(
@@ -232,7 +237,7 @@ fn cmd_j_keeps_to_the_tabs_the_search_shows() {
             // The panel's last render for this search showed the first two tabs.
             workspace
                 .vertical_tabs_panel
-                .record_search_matches("build", tabs[..2].to_vec());
+                .record_search_matches("build", whole_tabs(&tabs[..2]));
             assert_eq!(
                 workspace.next_unread_target(ctx),
                 Err("No unread tabs match this search")
@@ -243,28 +248,32 @@ fn cmd_j_keeps_to_the_tabs_the_search_shows() {
             // A render that shows the unread tab too.
             workspace
                 .vertical_tabs_panel
-                .record_search_matches("build", tabs.clone());
+                .record_search_matches("build", whole_tabs(&tabs));
             assert_eq!(workspace.next_unread_target(ctx), Ok(2));
 
             // A render for a query since changed doesn't filter anything.
             workspace
                 .vertical_tabs_panel
-                .record_search_matches("bui", tabs[..1].to_vec());
+                .record_search_matches("bui", whole_tabs(&tabs[..1]));
             assert_eq!(workspace.next_unread_target(ctx), Ok(2));
 
             // Nor does a search in a panel that isn't showing.
             workspace
                 .vertical_tabs_panel
-                .record_search_matches("build", tabs[..2].to_vec());
+                .record_search_matches("build", whole_tabs(&tabs[..2]));
             workspace.vertical_tabs_panel_open = false;
             assert_eq!(workspace.next_unread_target(ctx), Ok(2));
         });
     });
 }
 
-/// ⌘J goes to a tab exactly when one of its rows shows the dot, for both
-/// vertical layouts × which of the tab's two terminals has focus × which of
-/// them is unread.
+/// ⌘J goes to a tab exactly when one of the rows the panel shows for it has
+/// the dot, and focuses an unread pane, in the Panes layout one whose row the
+/// panel shows. Swept over both vertical layouts × which of the tab's two
+/// terminals has focus × which of them is unread × no search, or a search
+/// matching each subset of them. A Panes-layout search shows a row for each
+/// matching pane; in the Tabs layout the tab shows, as one row standing for
+/// the whole tab, when its focused pane matches.
 #[test]
 fn cmd_j_goes_to_exactly_the_tabs_whose_rows_show_the_dot() {
     let _unread = FeatureFlag::TabMarkUnread.override_enabled(true);
@@ -287,40 +296,154 @@ fn cmd_j_goes_to_exactly_the_tabs_whose_rows_show_the_dot() {
             set_tab_layout(&mut app, true, granularity);
             workspace.update(&mut app, |workspace, ctx| {
                 let pane_group = workspace.tabs[0].pane_group.clone();
+                let tab_ids = [pane_group.id(), workspace.tabs[1].pane_group.id()];
                 let views = panes.map(|(_, view)| view);
-                for (focused, _) in panes {
-                    pane_group.update(ctx, |pane_group, ctx| {
-                        pane_group.focus_pane_by_id(focused, ctx);
-                    });
+                let pane_ids = panes.map(|(pane_id, _)| pane_id);
+                let subset = |bits: u32| -> Vec<PaneId> {
+                    pane_ids
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| bits & (1 << index) != 0)
+                        .map(|(_, pane_id)| *pane_id)
+                        .collect()
+                };
+                for focused in pane_ids {
                     for unread_set in 0..4 {
-                        let unread: Vec<EntityId> = views
-                            .iter()
-                            .enumerate()
-                            .filter(|(index, _)| unread_set & (1 << index) != 0)
-                            .map(|(_, view)| *view)
-                            .collect();
-                        set_marks(&views, &unread, ctx);
-                        cases += 1;
+                        // `None` for no search, or the panes a search matches.
+                        for search in std::iter::once(None).chain((0..4).map(Some)) {
+                            // ⌘J starts on tab 1, with `focused` focused in tab 0.
+                            workspace.activate_tab(1, ctx);
+                            pane_group.update(ctx, |pane_group, ctx| {
+                                pane_group.focus_pane_by_id(focused, ctx);
+                            });
+                            let unread: Vec<EntityId> = views
+                                .iter()
+                                .enumerate()
+                                .filter(|(index, _)| unread_set & (1 << index) != 0)
+                                .map(|(_, view)| *view)
+                                .collect();
+                            set_marks(&views, &unread, ctx);
 
-                        let rows = match granularity {
-                            VerticalTabsDisplayGranularity::Tabs => vec![focused],
-                            VerticalTabsDisplayGranularity::Panes => {
-                                panes.iter().map(|(pane_id, _)| *pane_id).collect()
+                            // The rows the panel shows for tab 0.
+                            let rows: Vec<PaneId> = match (granularity, search) {
+                                (VerticalTabsDisplayGranularity::Tabs, None) => vec![focused],
+                                (VerticalTabsDisplayGranularity::Panes, None) => pane_ids.to_vec(),
+                                (VerticalTabsDisplayGranularity::Tabs, Some(matching)) => {
+                                    subset(matching)
+                                        .into_iter()
+                                        .filter(|pane_id| *pane_id == focused)
+                                        .collect()
+                                }
+                                (VerticalTabsDisplayGranularity::Panes, Some(matching)) => {
+                                    subset(matching)
+                                }
+                            };
+                            // What the panel's render records for the search.
+                            workspace.vertical_tabs_panel_open = true;
+                            let panel = &mut workspace.vertical_tabs_panel;
+                            match search {
+                                None => panel.search_query.clear(),
+                                Some(_) => {
+                                    panel.search_query = "x".to_owned();
+                                    let mut matches = whole_tabs(&tab_ids[1..]);
+                                    if !rows.is_empty() {
+                                        let recorded = match granularity {
+                                            VerticalTabsDisplayGranularity::Tabs => None,
+                                            VerticalTabsDisplayGranularity::Panes => {
+                                                Some(rows.clone())
+                                            }
+                                        };
+                                        matches.insert(0, (tab_ids[0], recorded));
+                                    }
+                                    panel.record_search_matches("x", matches);
+                                }
                             }
-                        };
-                        let a_row_shows_the_dot = rows.iter().any(|row| {
-                            row_shows_unread(pane_group.as_ref(ctx), *row, granularity, ctx)
-                        });
-                        assert_eq!(
-                            workspace.next_unread_target(ctx).ok(),
-                            a_row_shows_the_dot.then_some(0),
-                            "{granularity:?}, focused {focused:?}, unread set {unread_set}"
-                        );
+                            cases += 1;
+                            let case = format!(
+                                "{granularity:?}, focused {focused:?}, unread set {unread_set}, \
+                                 search {search:?}"
+                            );
+
+                            let a_row_shows_the_dot = rows.iter().any(|row| {
+                                row_shows_unread(pane_group.as_ref(ctx), *row, granularity, ctx)
+                            });
+                            assert_eq!(
+                                workspace.next_unread_target(ctx).ok(),
+                                a_row_shows_the_dot.then_some(0),
+                                "{case}"
+                            );
+                            if !a_row_shows_the_dot {
+                                continue;
+                            }
+
+                            workspace.jump_to_next_unread_tab(ctx);
+                            assert_eq!(workspace.active_tab_index, 0, "{case}");
+                            let landed = pane_group.as_ref(ctx).focused_pane_id(ctx);
+                            let may_land_on: &[PaneId] = match granularity {
+                                VerticalTabsDisplayGranularity::Tabs => &pane_ids,
+                                VerticalTabsDisplayGranularity::Panes => &rows,
+                            };
+                            assert!(
+                                may_land_on.contains(&landed)
+                                    && row_shows_unread(
+                                        pane_group.as_ref(ctx),
+                                        landed,
+                                        VerticalTabsDisplayGranularity::Panes,
+                                        ctx
+                                    ),
+                                "{case}: focused {landed:?}"
+                            );
+                        }
                     }
                 }
             });
         }
-        assert_eq!(cases, 2 * 2 * 4);
+        assert_eq!(cases, 2 * 2 * 4 * 5);
+    });
+}
+
+/// In the Panes layout, a search that shows only a tab's read pane hides the
+/// tab from ⌘J, whose toast says the search hides the unread tabs. Once the
+/// unread pane's row shows too, ⌘J goes there and focuses that pane.
+#[test]
+fn cmd_j_skips_a_tab_whose_unread_pane_the_search_hides() {
+    let _unread = FeatureFlag::TabMarkUnread.override_enabled(true);
+    let _vertical_tabs = FeatureFlag::VerticalTabs.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        set_tab_layout(&mut app, true, VerticalTabsDisplayGranularity::Panes);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let [(read, _), (unread, unread_view)] = split_tab(workspace, 0, ctx);
+            workspace.add_terminal_tab(false, ctx);
+            workspace.activate_tab(1, ctx);
+            set_marks(&[], &[unread_view], ctx);
+            let tabs = [
+                workspace.tabs[0].pane_group.id(),
+                workspace.tabs[1].pane_group.id(),
+            ];
+            workspace.vertical_tabs_panel_open = true;
+            workspace.vertical_tabs_panel.search_query = "x".to_owned();
+
+            workspace
+                .vertical_tabs_panel
+                .record_search_matches("x", vec![(tabs[0], Some(vec![read])), (tabs[1], None)]);
+            assert_eq!(
+                workspace.next_unread_target(ctx),
+                Err("No unread tabs match this search")
+            );
+
+            workspace.vertical_tabs_panel.record_search_matches(
+                "x",
+                vec![(tabs[0], Some(vec![read, unread])), (tabs[1], None)],
+            );
+            workspace.jump_to_next_unread_tab(ctx);
+            assert_eq!(workspace.active_tab_index, 0);
+            assert_eq!(
+                workspace.tabs[0].pane_group.as_ref(ctx).focused_pane_id(ctx),
+                unread
+            );
+        });
     });
 }
 
