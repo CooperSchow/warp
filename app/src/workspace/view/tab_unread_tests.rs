@@ -916,3 +916,206 @@ fn a_dot_on_the_selected_row_is_painted_in_the_title_ink() {
         });
     }
 }
+
+/// Where one paint of the horizontal tab bar put a tab's marks.
+#[derive(Debug)]
+struct HorizontalTabMarks {
+    /// The tab's unread dots, with their inks.
+    dots: Vec<(pathfinder_geometry::rect::RectF, ColorU)>,
+    /// The tab's stars.
+    stars: Vec<pathfinder_geometry::rect::RectF>,
+    /// The title's box, which ends where its clip and fade end.
+    title: pathfinder_geometry::rect::RectF,
+    /// The close button's slot, where a starred tab wears its star.
+    slot: pathfinder_geometry::rect::RectF,
+}
+
+/// The bundled icon at `path` as the image cache holds it at `size` points,
+/// once it has loaded: the very bitmap every icon painted from that file at
+/// that size shares.
+fn loaded_icon(
+    path: &'static str,
+    size: i32,
+    ctx: &AppContext,
+) -> Option<Arc<warpui::image_cache::StaticImage>> {
+    use pathfinder_geometry::vector::vec2i;
+    use warpui::assets::asset_cache::{AssetCache, AssetSource, AssetState};
+    use warpui::image_cache::{AnimatedImageBehavior, CacheOption, FitType, Image, ImageCache};
+
+    let AssetState::Loaded { data } = ImageCache::as_ref(ctx).image(
+        AssetSource::Bundled { path },
+        vec2i(size, size),
+        FitType::Contain,
+        AnimatedImageBehavior::FullAnimation,
+        CacheOption::BySize,
+        None,
+        AssetCache::as_ref(ctx),
+    ) else {
+        return None;
+    };
+    match data.as_ref() {
+        Image::Static(image) => Some(image.clone()),
+        _ => None,
+    }
+}
+
+/// Paints the workspace's whole window and reads back each horizontal tab's
+/// dots, stars, title box and close-button slot.
+fn painted_horizontal_tab_marks(
+    app: &mut App,
+    workspace: &ViewHandle<Workspace>,
+) -> Vec<HorizontalTabMarks> {
+    use pathfinder_geometry::rect::RectF;
+    use pathfinder_geometry::vector::vec2f;
+    use warpui::image_cache::StaticImage;
+    use warpui::{Presenter, WindowInvalidation};
+
+    use crate::tab::tab_position_id;
+
+    let (window_id, tab_count) = workspace.read(app, |workspace, _| {
+        (workspace.window_id, workspace.tabs.len())
+    });
+    app.update(|ctx| {
+        let mut presenter = Presenter::new(window_id);
+        // The first frame asks for each icon; the second paints any that were
+        // still loading during the first.
+        let mut scene = None;
+        for _ in 0..2 {
+            let invalidation = WindowInvalidation {
+                updated: ctx.view_ids_for_window(window_id).into_iter().collect(),
+                ..Default::default()
+            };
+            presenter.invalidate(invalidation, ctx);
+            scene = Some(presenter.build_scene(vec2f(1280., 800.), 1., None, ctx));
+        }
+        let scene = scene.expect("the window was painted");
+        let dot = loaded_icon("bundled/svg/circle-filled.svg", 8, ctx);
+        let star = loaded_icon("bundled/svg/star-filled.svg", 10, ctx);
+        let positions = presenter.position_cache();
+        let position = |id: String| {
+            positions
+                .get_position(id.as_str())
+                .unwrap_or_else(|| panic!("{id} should be painted"))
+        };
+        let icons_inside = |image: &Option<Arc<StaticImage>>, bounds: RectF| {
+            scene
+                .layers()
+                .flat_map(|layer| &layer.icons)
+                .filter(|icon| {
+                    image
+                        .as_ref()
+                        .is_some_and(|image| Arc::ptr_eq(&icon.asset, image))
+                        && bounds.contains_rect(icon.bounds)
+                })
+                .map(|icon| (icon.bounds, icon.color))
+                .collect::<Vec<_>>()
+        };
+        (0..tab_count)
+            .map(|index| {
+                let tab = position(tab_position_id(index));
+                HorizontalTabMarks {
+                    dots: icons_inside(&dot, tab),
+                    stars: icons_inside(&star, tab)
+                        .into_iter()
+                        .map(|(bounds, _)| bounds)
+                        .collect(),
+                    title: position(format!("tab_text_{index}")),
+                    slot: position(format!("close_tab_button:{index}")),
+                }
+            })
+            .collect()
+    })
+}
+
+/// With TabMarkUnread on, the horizontal tab bar shows the unread dot on each
+/// tab whose vertical row would show it, any tab with an unread terminal pane:
+/// in the title's ink on the active tab and the accent on the rest. It leads
+/// the title, clear of the title, of a starred tab's star and of the close
+/// button's slot. A starred tab's title ends the star's gap before that slot,
+/// so its clip and fade stop short of the star. With the flag off the bar
+/// shows no dot, as upstream's doesn't.
+#[test]
+fn the_horizontal_tab_bar_shows_the_dot_clear_of_the_title_and_the_star() {
+    use crate::appearance::Appearance;
+    use crate::workspace::view::starred_tabs::STAR_TITLE_GAP;
+
+    let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
+    let _stars = FeatureFlag::StarredTabs.override_enabled(true);
+    for tab_mark_unread in [false, true] {
+        let _unread = FeatureFlag::TabMarkUnread.override_enabled(tab_mark_unread);
+        App::test(crate::ASSETS, |mut app| async move {
+            initialize_app(&mut app);
+            set_tab_layout(&mut app, false, VerticalTabsDisplayGranularity::Tabs);
+            let workspace = mock_workspace(&mut app);
+            workspace.update(&mut app, |workspace, ctx| {
+                while workspace.tab_count() < 3 {
+                    workspace.add_terminal_tab(false, ctx);
+                }
+                workspace.vertical_tabs_panel_open = false;
+                workspace.activate_tab(0, ctx);
+                // Long enough to be clipped, so its box ends where its fade does.
+                workspace.handle_action(
+                    &WorkspaceAction::SetActiveTabName(
+                        "Reagan port: approve the D5 edit and the after-hours transfer gate"
+                            .to_owned(),
+                    ),
+                    ctx,
+                );
+                workspace.pin_tab(0, ctx);
+                let active = focused_terminal_view_id(workspace, 0, ctx);
+                let background = focused_terminal_view_id(workspace, 1, ctx);
+                set_marks(&[], &[active, background], ctx);
+            });
+            let (title_ink, accent) = app.update(|ctx| {
+                let theme = Appearance::as_ref(ctx).theme();
+                let title_ink: ColorU = theme.active_ui_text_color().into();
+                (title_ink, theme.accent().into_solid())
+            });
+            let marks = painted_horizontal_tab_marks(&mut app, &workspace);
+            let context = format!("TabMarkUnread {tab_mark_unread}");
+
+            let inks: Vec<Vec<ColorU>> = marks
+                .iter()
+                .map(|tab| tab.dots.iter().map(|(_, ink)| *ink).collect())
+                .collect();
+            if tab_mark_unread {
+                assert_ne!(title_ink, accent);
+                assert_eq!(
+                    inks,
+                    vec![vec![title_ink], vec![accent], vec![]],
+                    "{context}"
+                );
+            } else {
+                assert_eq!(inks, vec![Vec::<ColorU>::new(); 3], "{context}");
+            }
+
+            for (index, tab) in marks.iter().enumerate() {
+                for (dot, _) in &tab.dots {
+                    assert!(
+                        dot.max_x() <= tab.title.min_x(),
+                        "tab {index}: the dot leads the title: {tab:?}"
+                    );
+                    assert!(
+                        dot.max_x() < tab.slot.min_x(),
+                        "tab {index}: the dot is clear of the close button's slot: {tab:?}"
+                    );
+                }
+            }
+            let starred = &marks[0];
+            assert_eq!(
+                starred.stars.len(),
+                1,
+                "{context}: the starred tab wears its star"
+            );
+            assert!(
+                starred.slot.contains_rect(starred.stars[0]),
+                "{context}: the star is in the close button's slot: {starred:?}"
+            );
+            assert!(
+                starred.title.max_x() + STAR_TITLE_GAP <= starred.slot.min_x() + 0.01,
+                "{context}: the title's clip and fade end a gap before the star's slot: \
+                 {starred:?}"
+            );
+        });
+    }
+}

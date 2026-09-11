@@ -51,10 +51,12 @@ use crate::workspace::tab_group::{TabGroup, TabGroupId};
 use crate::workspace::tab_settings::{
     TabCloseButtonPosition, TabSettings, VerticalTabsDisplayGranularity,
 };
-use crate::workspace::view::starred_tabs::{render_pin_slot_mark, starred_tabs_enabled};
+use crate::workspace::view::starred_tabs::{
+    render_pin_slot_mark, starred_tabs_enabled, STAR_TITLE_GAP,
+};
 use crate::workspace::view::tab_unread::{
-    row_shows_unread, row_terminal_view, tab_mark_target, tab_unread_terminal_views,
-    toggle_key_acts_on_pane,
+    render_unread_dot, row_shows_unread, row_terminal_view, tab_is_unread, tab_mark_target,
+    tab_unread_terminal_views, toggle_key_acts_on_pane, unread_dot_ink,
 };
 use crate::workspace::view::{
     TOGGLE_ACTIVE_TAB_STAR_BINDING_NAME, TOGGLE_ACTIVE_TAB_UNREAD_BINDING_NAME,
@@ -138,6 +140,14 @@ pub(crate) const COMPACT_TAB_WIDTH_THRESHOLD: f32 = 42.0;
 const TAB_CLOSE_BUTTON_HORIZONTAL_INSET: f32 = 2.0;
 // Padding on each side of a pinned tab, reserving the pin's footprint so the title clips before it.
 const TAB_PINNED_CONTENT_HORIZONTAL_PADDING: f32 = 26.0;
+// The same with stars on: the pin's footprint and then the gap the vertical rows leave between a
+// star and its title, so the title's clip and fade end short of the star's slot rather than run
+// into the star.
+const TAB_STARRED_CONTENT_HORIZONTAL_PADDING: f32 =
+    TAB_PINNED_CONTENT_HORIZONTAL_PADDING + STAR_TITLE_GAP;
+// The gap between the unread dot and the title it leads, the one the vertical rows leave between a
+// title and its dot.
+const UNREAD_DOT_TITLE_GAP: f32 = 4.0;
 // Width below which a pinned tab/group header drops its idle pin (shared so both
 // vanish together), early enough that the pin never overlaps the centered title/icon.
 pub(crate) const TAB_PIN_VANISH_THRESHOLD: f32 = 70.0;
@@ -1178,6 +1188,10 @@ pub struct TabComponent<'a> {
     /// both the in-selection highlight and the right-click menu dispatch
     /// (multi-tab menu vs single-tab menu).
     is_in_multi_tab_selection: bool,
+    /// Whether the tab shows the unread dot: with `TabMarkUnread` on, when any
+    /// of its terminal panes is unread, the rule the vertical tabs panel's row
+    /// for the whole tab follows. Upstream's tab bar has no dot.
+    shows_unread_dot: bool,
 }
 
 /// Structure that holds TabComponent styles.
@@ -1348,6 +1362,8 @@ impl<'a> TabComponent<'a> {
             sole_grouped_member: false,
             locator,
             is_in_multi_tab_selection: false,
+            shows_unread_dot: FeatureFlag::TabMarkUnread.is_enabled()
+                && tab_is_unread(tab.pane_group.as_ref(ctx), ctx),
         }
     }
 
@@ -1927,11 +1943,38 @@ impl<'a> TabComponent<'a> {
             (bg, border)
         };
 
+        // The unread dot, in the title's ink on the active tab and the accent on
+        // the rest, the rule the vertical tabs panel's rows follow.
+        let render_tab_unread_dot = || {
+            let styles = if self.is_active_tab() {
+                self.styles.default.merge(self.styles.active)
+            } else {
+                self.styles.default
+            };
+            let title_ink = styles.font_color.expect("Font color is set");
+            render_unread_dot(unread_dot_ink(
+                self.appearance.theme().accent(),
+                title_ink.into(),
+                self.is_active_tab(),
+            ))
+        };
+        // The dot sits against the title on the side away from the close
+        // button's slot, where a starred tab wears its star, so it never meets
+        // the title, the star or the close button.
+        let close_button_on_left = FeatureFlag::TabCloseButtonOnLeft.is_enabled()
+            && matches!(self.close_button_position, TabCloseButtonPosition::Left);
         let build_full_content = |reserve_pin_space: bool| -> Box<dyn Element> {
             let mut flex_row = Flex::row()
                 .with_main_axis_size(MainAxisSize::Max)
                 .with_main_axis_alignment(MainAxisAlignment::Center)
                 .with_cross_axis_alignment(warpui::elements::CrossAxisAlignment::Center);
+            if self.shows_unread_dot && !close_button_on_left {
+                flex_row.add_child(
+                    Container::new(render_tab_unread_dot())
+                        .with_margin_right(UNREAD_DOT_TITLE_GAP)
+                        .finish(),
+                );
+            }
             if let Some(indicator) = self.render_indicator() {
                 flex_row.add_child(indicator);
             }
@@ -1943,12 +1986,22 @@ impl<'a> TabComponent<'a> {
                 )
                 .finish(),
             );
+            if self.shows_unread_dot && close_button_on_left {
+                flex_row.add_child(
+                    Container::new(render_tab_unread_dot())
+                        .with_margin_left(UNREAD_DOT_TITLE_GAP)
+                        .finish(),
+                );
+            }
             // Equal padding on both sides so the title stays centered; the pin
-            // vanishes before it can reach the title.
-            let horizontal_padding = if reserve_pin_space {
-                TAB_PINNED_CONTENT_HORIZONTAL_PADDING
-            } else {
+            // vanishes before it can reach the title, and a star keeps a gap
+            // from the title's fade.
+            let horizontal_padding = if !reserve_pin_space {
                 8.
+            } else if starred_tabs_enabled() {
+                TAB_STARRED_CONTENT_HORIZONTAL_PADDING
+            } else {
+                TAB_PINNED_CONTENT_HORIZONTAL_PADDING
             };
             let mut container =
                 Container::new(flex_row.finish()).with_horizontal_padding(horizontal_padding);
