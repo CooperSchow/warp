@@ -1,5 +1,7 @@
-//! ⌘J: jump to the topmost unread tab other than the active one. Starred tabs
-//! lead the list, so they come first, with no priorities to learn.
+//! ⌘J: jump to the next unread tab below the active one, wrapping around to the
+//! top, so pressing it again and again steps through every unread tab in list
+//! order. Starred tabs lead the list, so from the top they come first, with no
+//! priorities to learn.
 
 use warpui::{AppContext, SingletonEntity, ViewContext};
 
@@ -11,18 +13,19 @@ use crate::tab::uses_vertical_tabs;
 use crate::view_components::DismissibleToast;
 use crate::workspace::tab_settings::VerticalTabsDisplayGranularity;
 
-/// The topmost tab in `visible` (tab indices, in list order) that is unread
-/// and isn't `active`.
+/// The first unread tab in `visible` (tab indices, in list order, which is
+/// ascending) below `active`, wrapping around to the top; never `active`
+/// itself. It goes on from the active tab rather than starting at the top
+/// because a tab only reads once focus has settled on it: "the topmost unread
+/// tab" would bounce between the top two on quick presses.
 pub(super) fn next_unread_tab(
     visible: &[usize],
     active: usize,
     is_unread: impl Fn(usize) -> bool,
 ) -> Option<usize> {
-    visible
-        .iter()
-        .copied()
-        .filter(|&index| index != active)
-        .find(|&index| is_unread(index))
+    let below = visible.iter().copied().filter(|&index| index > active);
+    let above = visible.iter().copied().filter(|&index| index < active);
+    below.chain(above).find(|&index| is_unread(index))
 }
 
 /// What ⌘J's toast says when there's no tab to jump to.
@@ -89,11 +92,11 @@ fn unread_pane_to_focus(
 }
 
 impl Workspace {
-    /// Activates the topmost unread tab other than the active one, among the
-    /// tabs the vertical tabs search shows, and focuses its unread pane: in
-    /// the Panes layout, one whose row the search shows. A toast says so when
-    /// there's none. It reads only what's already in memory: no file, and no
-    /// terminal model lock.
+    /// Activates the next unread tab below the active one, wrapping to the
+    /// top, among the tabs the vertical tabs search shows, and focuses its
+    /// unread pane: in the Panes layout, one whose row the search shows. A
+    /// toast says so when there's none. It reads only what's already in
+    /// memory: no file, and no terminal model lock.
     pub(super) fn jump_to_next_unread_tab(&mut self, ctx: &mut ViewContext<Self>) {
         match self.next_unread_target(ctx) {
             Ok(index) => {

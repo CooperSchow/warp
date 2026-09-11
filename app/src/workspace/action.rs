@@ -276,7 +276,7 @@ pub enum WorkspaceAction {
     },
     /// Marks the active tab unread, or read if it has an unread pane.
     ToggleActiveTabUnread,
-    /// Activates the topmost unread tab other than the active one.
+    /// Activates the next unread tab below the active one, wrapping to the top.
     JumpToNextUnreadTab,
     AddDefaultTab,
     AddTerminalTab {

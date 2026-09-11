@@ -88,20 +88,33 @@ fn next_unread_tab_sweeps_every_small_tab_list() {
 
                         let next = next_unread_tab(&visible, active, unread);
                         // None exactly when no other visible tab is unread,
-                        // and otherwise the topmost of them.
-                        assert_eq!(next, others.first().copied(), "{case}");
+                        // and otherwise the first of them below the active
+                        // tab, or the topmost when none is below it.
+                        let below = others.iter().copied().find(|&index| index > active);
+                        assert_eq!(next, below.or(others.first().copied()), "{case}");
                         if let Some(next) = next {
                             assert_ne!(next, active, "{case}");
                             assert!(unread(next), "{case}");
+                            // Going down from the active tab and wrapping to
+                            // the top, no visible unread tab is passed over.
+                            let passed_over = |index: usize| {
+                                if next > active {
+                                    index > active && index < next
+                                } else {
+                                    index > active || index < next
+                                }
+                            };
                             assert!(
                                 visible
                                     .iter()
-                                    .take_while(|&&index| index != next)
-                                    .all(|&index| index == active || !unread(index)),
-                                "no visible unread tab sits above it: {case}"
+                                    .all(|&index| !passed_over(index) || !unread(index)),
+                                "no visible unread tab is passed over: {case}"
                             );
-                            if others.iter().any(|&index| index < starred) {
-                                assert!(next < starred, "a starred tab comes first: {case}");
+                            if below.is_none() && others.iter().any(|&index| index < starred) {
+                                assert!(
+                                    next < starred,
+                                    "wrapping to the top, a starred tab comes first: {case}"
+                                );
                             }
                         }
 
@@ -134,6 +147,17 @@ fn next_unread_tab_sweeps_every_small_tab_list() {
                             expected,
                             "{case}: {visited:?}"
                         );
+                        // In list order: down from the starting tab, then
+                        // from the top, and the starting tab last.
+                        if !others.is_empty() {
+                            let mut order: Vec<usize> =
+                                others.iter().copied().filter(|&index| index > active).collect();
+                            order.extend(others.iter().copied().filter(|&index| index < active));
+                            if visible.contains(&active) && unread(active) {
+                                order.push(active);
+                            }
+                            assert_eq!(visited, order, "the walk's order: {case}");
+                        }
                     }
                 }
             }
@@ -456,9 +480,10 @@ fn focused_terminal_view(workspace: &Workspace, tab_index: usize, app: &AppConte
         .id()
 }
 
-/// Quick ⌘J presses across marked tabs, as holding the key makes, leave every
-/// tab they pass through marked. The tab they stop on clears once focus has
-/// stayed on it for the dwell, and no other tab does.
+/// Quick ⌘J presses across marked tabs, as holding the key makes, step down the
+/// list and wrap to the top, and leave every tab they pass through marked. The
+/// tab they stop on clears once focus has stayed on it for the dwell, and no
+/// other tab does.
 #[test]
 fn quick_cmd_j_presses_leave_the_tabs_they_pass_through_marked() {
     let _unread = FeatureFlag::TabMarkUnread.override_enabled(true);
@@ -492,6 +517,7 @@ fn quick_cmd_j_presses_leave_the_tabs_they_pass_through_marked() {
                 marked.iter().all(|view| is_unread(*view, ctx)),
                 "no quick press clears a tab: stops {stops:?}"
             );
+            assert_eq!(stops, [1, 2, 3, 1], "quick presses step down the list and wrap");
             stops
         });
 
