@@ -5,7 +5,7 @@ use warp_core::features::FeatureFlag;
 use warp_errors::report_if_error;
 use warpui::{App, EntityId, ModelHandle, SingletonEntity, WindowId};
 
-use super::{AgentNotificationsModel, ACTIVE_WINDOW_FOCUS_FOR_TESTS};
+use super::{AgentNotificationsModel, DwellId, ACTIVE_WINDOW_FOCUS_FOR_TESTS};
 use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
 use crate::ai::agent::conversation::{AIConversation, AIConversationId, ConversationStatus};
 use crate::ai::agent_management::notifications::{
@@ -555,8 +555,10 @@ fn focus_reports_that_must_not_clear_a_mark() {
     });
 }
 
+/// An arrival clears a mark once focus has stayed on its view for the dwell.
 #[test]
 fn an_arrival_clears_a_mark() {
+    let _unread = FeatureFlag::TabMarkUnread.override_enabled(true);
     App::test((), |mut app| async move {
         let (_history, notifications) = setup_app(&mut app);
         let window = WindowId::new();
@@ -564,18 +566,148 @@ fn an_arrival_clears_a_mark() {
         notifications.update(&mut app, |model, ctx| {
             model.record_terminal_focus(window, Some(other), true, ctx);
             model.mark_unread(&[marked], ctx);
-            model.record_terminal_focus(window, Some(marked), true, ctx);
+            let dwell = model
+                .record_terminal_focus(window, Some(marked), true, ctx)
+                .expect("an arrival from another terminal");
+            assert!(model.is_unread(marked), "nothing clears before the dwell ends");
+            model.finish_dwell(window, dwell, Some(marked), ctx);
             assert!(!model.is_unread(marked), "an arrival from another terminal");
 
             // Leaving for a non-terminal pane clears nothing; coming back does.
             model.mark_unread(&[marked], ctx);
-            model.record_terminal_focus(window, None, true, ctx);
+            assert_eq!(model.record_terminal_focus(window, None, true, ctx), None);
             assert!(model.is_unread(marked));
-            model.record_terminal_focus(window, Some(marked), true, ctx);
+            let dwell = model
+                .record_terminal_focus(window, Some(marked), true, ctx)
+                .expect("an arrival from a non-terminal pane");
+            model.finish_dwell(window, dwell, Some(marked), ctx);
             assert!(
                 !model.is_unread(marked),
                 "an arrival from a non-terminal pane"
             );
+        });
+    });
+}
+
+/// A mark clears only if focus is still on its view when the arrival's dwell
+/// ends. Leaving first, a later arrival or the window losing focus ends the
+/// dwell with the mark in place, and a stale timer does nothing. A mark set,
+/// or a restored mark committed, after the arrival began outlasts the dwell.
+/// Mark as Read and a close still clear at once.
+#[test]
+fn a_mark_clears_only_once_focus_has_stayed_for_the_dwell() {
+    let _unread = FeatureFlag::TabMarkUnread.override_enabled(true);
+    App::test((), |mut app| async move {
+        let (_history, notifications) = setup_app(&mut app);
+        let window = WindowId::new();
+        let (marked, other, restored) = (EntityId::new(), EntityId::new(), EntityId::new());
+        notifications.update(&mut app, |model, ctx| {
+            model.record_terminal_focus(window, Some(other), true, ctx);
+            model.mark_unread(&[marked], ctx);
+
+            // Focus passes through: leaving before the dwell ends keeps the mark.
+            let passing = model
+                .record_terminal_focus(window, Some(marked), true, ctx)
+                .expect("an arrival");
+            assert!(model.has_pending_dwell(window));
+            model.record_terminal_focus(window, Some(other), true, ctx);
+            model.finish_dwell(window, passing, Some(marked), ctx);
+            assert!(model.is_unread(marked), "left before the dwell ended");
+
+            // A later arrival replaces a dwell, and the replaced one's timer
+            // does nothing.
+            let replaced = model
+                .record_terminal_focus(window, Some(marked), true, ctx)
+                .expect("an arrival");
+            model.record_terminal_focus(window, None, true, ctx);
+            let dwell = model
+                .record_terminal_focus(window, Some(marked), true, ctx)
+                .expect("an arrival");
+            model.finish_dwell(window, replaced, Some(marked), ctx);
+            assert!(model.is_unread(marked), "a replaced dwell's timer");
+            assert!(model.has_pending_dwell(window));
+
+            // The dwell ends with no terminal focused in an active window.
+            model.finish_dwell(window, dwell, None, ctx);
+            assert!(model.is_unread(marked), "the window lost focus");
+            assert!(!model.has_pending_dwell(window));
+            model.finish_dwell(window, dwell, Some(marked), ctx);
+            assert!(model.is_unread(marked), "a dwell ends once");
+
+            // Marked read and then unread again after the arrival began: the
+            // read clears at once, and the new mark outlasts the dwell.
+            model.record_terminal_focus(window, Some(other), true, ctx);
+            let dwell = model
+                .record_terminal_focus(window, Some(marked), true, ctx)
+                .expect("an arrival");
+            model.mark_read(&[marked], ctx);
+            assert!(!model.is_unread(marked), "Mark as Read clears at once");
+            model.mark_unread(&[marked], ctx);
+            model.finish_dwell(window, dwell, Some(marked), ctx);
+            assert!(model.is_unread(marked), "a mark set during the dwell");
+
+            // A restored mark committed during the dwell counts as set then.
+            model.stage_restored_unread(restored, ctx);
+            let dwell = model
+                .record_terminal_focus(window, Some(restored), true, ctx)
+                .expect("an arrival");
+            model.commit_restored_unread(window, &[restored], Some(restored));
+            model.finish_dwell(window, dwell, Some(restored), ctx);
+            assert!(model.is_unread(restored), "committed during the dwell");
+
+            // Focus staying for the dwell clears a mark set before the arrival.
+            let dwell = model
+                .record_terminal_focus(window, Some(marked), true, ctx)
+                .expect("an arrival");
+            model.finish_dwell(window, dwell, Some(marked), ctx);
+            assert!(!model.is_unread(marked), "focus stayed for the dwell");
+
+            // Closing a view drops its dwell along with its mark.
+            model.mark_unread(&[other], ctx);
+            assert!(model
+                .record_terminal_focus(window, Some(other), true, ctx)
+                .is_some());
+            model.forget_terminal_view(other, ctx);
+            assert!(!model.is_unread(other), "closed for good");
+            assert!(!model.has_pending_dwell(window));
+        });
+    });
+}
+
+/// A tab reached before its window comes to the front, as a notification click
+/// does while another app is in front, counts as arrived at once the window
+/// does: arrivals are measured against the focus last seen while the window was
+/// active. A plain ⌘Tab back to the pane the window had is still no arrival.
+#[test]
+fn arriving_from_outside_the_app_is_an_arrival() {
+    let _unread = FeatureFlag::TabMarkUnread.override_enabled(true);
+    App::test((), |mut app| async move {
+        let (_history, notifications) = setup_app(&mut app);
+        let (clicked, refocused) = (WindowId::new(), WindowId::new());
+        let (a, b, c) = (EntityId::new(), EntityId::new(), EntityId::new());
+        notifications.update(&mut app, |model, ctx| {
+            // The notification click switches to b before the window is key.
+            model.record_terminal_focus(clicked, Some(a), true, ctx);
+            model.mark_unread(&[b], ctx);
+            assert_eq!(model.record_terminal_focus(clicked, Some(b), false, ctx), None);
+            let dwell = model
+                .record_terminal_focus(clicked, Some(b), true, ctx)
+                .expect("the window comes to the front on another pane");
+            model.finish_dwell(clicked, dwell, Some(b), ctx);
+            assert!(!model.is_unread(b), "arrived at from outside the app");
+
+            // ⌘Tab back to the pane the window had, even after focus moved
+            // away and back while it was behind.
+            model.record_terminal_focus(refocused, Some(c), true, ctx);
+            model.mark_unread(&[c], ctx);
+            assert_eq!(model.record_terminal_focus(refocused, Some(a), false, ctx), None);
+            assert_eq!(model.record_terminal_focus(refocused, Some(c), false, ctx), None);
+            assert_eq!(
+                model.record_terminal_focus(refocused, Some(c), true, ctx),
+                None,
+                "back where it was when last in front"
+            );
+            assert!(model.is_unread(c));
         });
     });
 }
@@ -727,6 +859,7 @@ fn forgetting_a_view_drops_its_marks() {
 
 #[test]
 fn a_restored_mark_survives_arrivals_until_committed_and_the_commit_sets_the_baseline() {
+    let _unread = FeatureFlag::TabMarkUnread.override_enabled(true);
     App::test((), |mut app| async move {
         let (_history, notifications) = setup_app(&mut app);
         let window = WindowId::new();
@@ -751,10 +884,16 @@ fn a_restored_mark_survives_arrivals_until_committed_and_the_commit_sets_the_bas
 
             // The commit made the focused view the baseline, so reporting it
             // again isn't an arrival.
-            model.record_terminal_focus(window, Some(restored), true, ctx);
+            assert_eq!(
+                model.record_terminal_focus(window, Some(restored), true, ctx),
+                None
+            );
             assert!(model.is_unread(restored));
             model.record_terminal_focus(window, Some(other), true, ctx);
-            model.record_terminal_focus(window, Some(restored), true, ctx);
+            let dwell = model
+                .record_terminal_focus(window, Some(restored), true, ctx)
+                .expect("an arrival");
+            model.finish_dwell(window, dwell, Some(restored), ctx);
             assert!(
                 !model.is_unread(restored),
                 "committed, it clears like any other mark"
@@ -765,6 +904,7 @@ fn a_restored_mark_survives_arrivals_until_committed_and_the_commit_sets_the_bas
 
 #[test]
 fn a_window_the_registry_no_longer_knows_loses_its_focus_baseline() {
+    let _unread = FeatureFlag::TabMarkUnread.override_enabled(true);
     App::test((), |mut app| async move {
         let (_history, notifications) = setup_app(&mut app);
         // No workspace is registered, so every window but the reporting one
@@ -774,13 +914,18 @@ fn a_window_the_registry_no_longer_knows_loses_its_focus_baseline() {
         let (marked, other) = (EntityId::new(), EntityId::new());
         notifications.update(&mut app, |model, ctx| {
             model.record_terminal_focus(closed, Some(other), true, ctx);
+            assert!(model
+                .record_terminal_focus(closed, Some(marked), true, ctx)
+                .is_some());
             assert!(
                 model.last_focus_by_window.contains_key(&closed),
                 "the reporting window stays"
             );
 
-            model.record_terminal_focus(open, Some(other), false, ctx);
+            // Reported while in front, since only that records a baseline.
+            model.record_terminal_focus(open, Some(other), true, ctx);
             assert!(!model.last_focus_by_window.contains_key(&closed));
+            assert!(!model.has_pending_dwell(closed), "its dwell goes too");
             assert!(model.last_focus_by_window.contains_key(&open));
 
             // Its baseline gone, the window's next report is a baseline again.
@@ -846,26 +991,37 @@ impl World {
 }
 
 /// What the rule says, worked out apart from the model: when each view was
-/// last marked and last cleared, which views are staged, and what each window
-/// last reported.
+/// last marked and last cleared, which views are staged, what each window last
+/// reported while it was in front, and the arrival each window is dwelling on.
 #[derive(Default)]
 struct Expected {
     last_mark: HashMap<EntityId, usize>,
     last_clear: HashMap<EntityId, usize>,
     staged: HashSet<EntityId>,
     reported: HashMap<WindowId, Option<EntityId>>,
+    /// Each window's dwell: the view focus arrived at, and the step it did.
+    dwells: HashMap<WindowId, (EntityId, usize)>,
+    /// Dwells that ended with focus still on their view.
+    dwells_completed: usize,
+    /// Of those, the ones whose view was marked again after its arrival.
+    dwells_outlasted_by_a_mark: usize,
+    /// Dwells ended by a report naming another view.
+    dwells_ended_early: usize,
 }
 
 impl Expected {
-    /// Marked after its last arrival, qualifying reply, Mark as Read or close.
+    /// Marked after its last completed dwell, which counts from the arrival
+    /// that began it, qualifying reply, Mark as Read or close.
     fn manually_unread(&self, view: EntityId) -> bool {
         self.last_mark
             .get(&view)
             .is_some_and(|mark| self.last_clear.get(&view).is_none_or(|clear| mark > clear))
     }
 
-    /// A report is an arrival when the window is in front, had reported
-    /// before, and reported something else then.
+    /// Any report naming another view ends the window's dwell. A report while
+    /// the window is in front is an arrival when the window had reported while
+    /// in front before, and something else then, and an arrival begins a
+    /// dwell. A report while the window is behind leaves that baseline alone.
     fn report(
         &mut self,
         window: WindowId,
@@ -873,11 +1029,38 @@ impl Expected {
         is_active: bool,
         step: usize,
     ) {
+        if self
+            .dwells
+            .get(&window)
+            .is_some_and(|(view, _)| Some(*view) != focused)
+        {
+            self.dwells.remove(&window);
+            self.dwells_ended_early += 1;
+        }
+        if !is_active {
+            return;
+        }
         let previous = self.reported.insert(window, focused);
         if let Some(focused) = focused {
-            if is_active && previous.is_some_and(|previous| previous != Some(focused)) {
-                self.last_clear.insert(focused, step);
+            if previous.is_some_and(|previous| previous != Some(focused)) {
+                self.dwells.insert(window, (focused, step));
             }
+        }
+    }
+
+    /// Time passes and every dwell ends. One whose view is still focused in
+    /// the active window clears the marks set before its arrival.
+    fn time_passes(&mut self, looking_at: Option<EntityId>) {
+        for (view, arrived) in std::mem::take(&mut self.dwells).into_values() {
+            if looking_at != Some(view) {
+                continue;
+            }
+            self.dwells_completed += 1;
+            if self.last_mark.get(&view).is_some_and(|mark| *mark > arrived) {
+                self.dwells_outlasted_by_a_mark += 1;
+            }
+            let clear = self.last_clear.entry(view).or_insert(arrived);
+            *clear = (*clear).max(arrived);
         }
     }
 }
@@ -907,9 +1090,11 @@ enum SweepEvent {
     Commit,
     /// The pane closes for good, and a new one takes its place.
     Close,
+    /// A dwell's worth of time passes, and every dwell timer fires.
+    TimePasses,
 }
 
-const SWEEP_EVENTS: [SweepEvent; 11] = [
+const SWEEP_EVENTS: [SweepEvent; 12] = [
     SweepEvent::MarkUnread,
     SweepEvent::MarkRead,
     SweepEvent::SameFocus,
@@ -921,21 +1106,25 @@ const SWEEP_EVENTS: [SweepEvent; 11] = [
     SweepEvent::Stage,
     SweepEvent::Commit,
     SweepEvent::Close,
+    SweepEvent::TimePasses,
 ];
 
 struct Sweep {
     notifications: ModelHandle<AgentNotificationsModel>,
     world: World,
     expected: Expected,
+    /// The dwell timers running, stale ones included, as a workspace's are.
+    timers: Vec<(WindowId, DwellId)>,
 }
 
 impl Sweep {
     fn report(&mut self, app: &mut App, window: usize, is_active: bool, step: usize) {
         let window_id = self.world.windows[window];
         let focused = self.world.focus(window);
-        self.notifications.update(app, |model, ctx| {
-            model.record_terminal_focus(window_id, focused, is_active, ctx);
+        let dwell = self.notifications.update(app, |model, ctx| {
+            model.record_terminal_focus(window_id, focused, is_active, ctx)
         });
+        self.timers.extend(dwell.map(|dwell| (window_id, dwell)));
         self.expected.report(window_id, focused, is_active, step);
     }
 
@@ -1015,33 +1204,50 @@ impl Sweep {
                     .update(app, |model, ctx| model.forget_terminal_view(view, ctx));
                 self.expected.last_clear.insert(view, step);
                 self.expected.staged.remove(&view);
+                self.expected
+                    .dwells
+                    .retain(|_, (dwelling_on, _)| *dwelling_on != view);
                 for pane in self.world.panes.iter_mut().flatten().flatten() {
                     if *pane == view {
                         *pane = EntityId::new();
                     }
                 }
             }
+            SweepEvent::TimePasses => {
+                let looking_at = self.world.focus(self.world.active_window);
+                let timers = std::mem::take(&mut self.timers);
+                self.notifications.update(app, |model, ctx| {
+                    for (window_id, dwell) in timers {
+                        model.finish_dwell(window_id, dwell, looking_at, ctx);
+                    }
+                });
+                self.expected.time_passes(looking_at);
+            }
         }
     }
 }
 
 /// Seeded runs of 500 steps over two windows of three tabs of two terminal
-/// panes. After every step, a view is manually unread exactly when it was
-/// marked, or had its restored mark committed, after its last arrival,
-/// qualifying reply, Mark as Read or close; and staged exactly when restore
-/// staged it after its last commit, Mark as Read or close.
+/// panes, with a dwell's worth of time passing as one of the steps. After every
+/// step, a view is manually unread exactly when it was marked, or had its
+/// restored mark committed, after its last completed dwell (which counts from
+/// the arrival that began it), qualifying reply, Mark as Read or close; it's
+/// staged exactly when restore staged it after its last commit, Mark as Read
+/// or close; and each window is dwelling on the view the rule says it is.
 #[test]
 fn unread_clearing_sweep() {
     let _unread = FeatureFlag::TabMarkUnread.override_enabled(true);
     let _mailbox = FeatureFlag::HOANotifications.override_enabled(false);
     App::test((), |mut app| async move {
         let (_history, notifications) = setup_app(&mut app);
+        let (mut completed, mut outlasted, mut ended_early) = (0, 0, 0);
         for seed in 1..=16u64 {
             let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
             let mut sweep = Sweep {
                 notifications: notifications.clone(),
                 world: World::new(),
                 expected: Expected::default(),
+                timers: Vec::new(),
             };
             for step in 0..500 {
                 sweep.step(&mut app, &mut rng, step);
@@ -1059,8 +1265,30 @@ fn unread_clearing_sweep() {
                             "seed {seed}, step {step}: the staged mark on {view:?}"
                         );
                     }
+                    for window in sweep.world.windows {
+                        assert_eq!(
+                            model
+                                .dwells
+                                .get(&window)
+                                .map(|dwell| dwell.terminal_view_id),
+                            sweep.expected.dwells.get(&window).map(|(view, _)| *view),
+                            "seed {seed}, step {step}: the dwell in {window:?}"
+                        );
+                    }
                 });
             }
+            completed += sweep.expected.dwells_completed;
+            outlasted += sweep.expected.dwells_outlasted_by_a_mark;
+            ended_early += sweep.expected.dwells_ended_early;
         }
+        eprintln!(
+            "unread_clearing_sweep: {completed} dwells completed, {outlasted} outlasted by a \
+             mark, {ended_early} ended early"
+        );
+        assert!(
+            completed > 0 && outlasted > 0 && ended_early > 0,
+            "every way a dwell ends happens: {completed} completed, {outlasted} outlasted by a \
+             mark, {ended_early} ended early"
+        );
     });
 }

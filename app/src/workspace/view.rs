@@ -5563,7 +5563,8 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         let window_id = ctx.window_id();
-        let is_active_window = ctx.windows().active_window() == Some(window_id);
+        let is_active_window =
+            crate::ai::agent_management::active_window_id(ctx) == Some(window_id);
         ActiveAgentViewsModel::handle(ctx).update(ctx, |model, ctx| {
             model.handle_pane_focus_change(
                 window_id,
@@ -5575,17 +5576,26 @@ impl Workspace {
         // Unread marks see focus through one resolver, whatever this caller
         // reports: the deferred report for a new pane group names the tab's
         // active session while the others name its focused pane, and a
-        // disagreement between the two would look like an arrival and clear a
-        // mark. Every report is recorded, `None` and inactive windows included.
+        // disagreement between the two would look like an arrival. Every
+        // report goes to the model, `None` and inactive windows included.
         let focused_for_marks = self.active_tab_focused_terminal_view_id(ctx);
-        AgentNotificationsModel::handle(ctx).update(ctx, |model, ctx| {
-            model.record_terminal_focus(window_id, focused_for_marks, is_active_window, ctx);
+        let dwell = AgentNotificationsModel::handle(ctx).update(ctx, |model, ctx| {
+            let dwell =
+                model.record_terminal_focus(window_id, focused_for_marks, is_active_window, ctx);
+            // A pane focus arrives at is read once focus has stayed on it for
+            // the dwell, so while the dwell runs these reports leave its
+            // notifications for the dwell to read. Without TabMarkUnread there
+            // are no dwells, and every report reads them as upstream's does.
             if let Some(terminal_view_id) = focused_terminal_view_id {
-                if is_active_window {
+                if is_active_window && !model.has_pending_dwell(window_id) {
                     model.mark_items_from_terminal_view_read(terminal_view_id, ctx);
                 }
             }
+            dwell
         });
+        if let Some(dwell) = dwell {
+            self.wait_out_arrival_dwell(dwell, ctx);
+        }
     }
 
     /// The terminal view in the active tab's focused pane, or `None` when that

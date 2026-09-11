@@ -28,16 +28,36 @@ pub struct AgentNotificationsModel {
     /// Artifacts accumulated during the current turn for each conversation.
     /// Drained into the notification when a terminal state fires, cleared on InProgress.
     pub(crate) pending_artifacts: HashMap<AIConversationId, Vec<Artifact>>,
-    /// Terminal views marked unread by hand. A mark holds until its view is
-    /// arrived at, replied to, marked read, or closed for good.
+    /// Terminal views marked unread by hand. A mark holds until focus arrives
+    /// at its view and stays there for the dwell, or the view is replied to,
+    /// marked read, or closed for good.
     manually_unread: HashSet<EntityId>,
     /// Marks restored with their panes: shown as unread, but out of reach of
     /// focus reports until restore commits them.
     staged_unread: HashSet<EntityId>,
-    /// The terminal last reported focused in each window's active tab, `None`
-    /// while a non-terminal pane has focus. A window has no entry until its
-    /// first report, which is a baseline rather than an arrival.
+    /// The terminal last seen focused in each window's active tab while the
+    /// window was active, `None` while a non-terminal pane had focus. A window
+    /// has no entry until its first report while active, which is a baseline
+    /// rather than an arrival.
     last_focus_by_window: HashMap<WindowId, Option<EntityId>>,
+    /// The arrival in each window still waiting out its dwell.
+    dwells: HashMap<WindowId, Dwell>,
+    /// The id the next dwell gets.
+    next_dwell_id: u64,
+}
+
+/// Names one arrival's dwell, so a timer that outlives the dwell finds
+/// nothing to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DwellId(u64);
+
+/// An arrival waiting to see whether focus stays on the view it reached.
+struct Dwell {
+    id: DwellId,
+    terminal_view_id: EntityId,
+    /// Whether the view was marked after the arrival began. That mark is newer
+    /// than the arrival, so the dwell leaves it.
+    marked_since_arrival: bool,
 }
 
 impl Entity for AgentNotificationsModel {
@@ -69,6 +89,8 @@ impl AgentNotificationsModel {
             manually_unread: HashSet::new(),
             staged_unread: HashSet::new(),
             last_focus_by_window: HashMap::new(),
+            dwells: HashMap::new(),
+            next_dwell_id: 0,
         }
     }
 
@@ -132,8 +154,10 @@ impl AgentNotificationsModel {
         !self.staged_unread.is_empty()
     }
 
-    /// Marks the terminal views unread by hand. A mark holds until its view is
-    /// arrived at, replied to, marked read, or closed for good.
+    /// Marks the terminal views unread by hand. A mark holds until focus
+    /// arrives at its view and stays there for the dwell, or the view is
+    /// replied to, marked read, or closed for good. A mark set while focus is
+    /// dwelling on its view outlasts that dwell.
     pub(crate) fn mark_unread(
         &mut self,
         terminal_view_ids: &[EntityId],
@@ -143,6 +167,7 @@ impl AgentNotificationsModel {
         for terminal_view_id in terminal_view_ids {
             changed |= self.manually_unread.insert(*terminal_view_id);
         }
+        self.note_marks_since_arrival(terminal_view_ids);
         if changed {
             ctx.emit(AgentManagementEvent::NotificationUpdated);
         }
@@ -169,44 +194,121 @@ impl AgentNotificationsModel {
     }
 
     /// Records the terminal focused in `window_id`'s active tab (`None` when a
-    /// non-terminal pane has focus). A mark clears only when its view replaces
-    /// a different, already-known focus in the active window, so the first
-    /// report in a window, a repeat of the same view and a report from an
-    /// inactive window never clear one.
+    /// non-terminal pane has focus). Returns the dwell the report begins, for
+    /// the caller to end with `finish_dwell` once `ARRIVAL_DWELL` has passed.
+    ///
+    /// A report begins a dwell when it's an arrival: its view replaces a
+    /// different, already-known focus while the window is active. That's
+    /// measured against the focus last seen while the window was active, so a
+    /// switch made while the window was in the background, like a notification
+    /// click, counts once the window comes to the front, while the first
+    /// report in a window, a repeat of the same view and a window coming back
+    /// to the view it had never do. Any report that names another view ends
+    /// the window's dwell early. Dwells need `TabMarkUnread`.
     pub(crate) fn record_terminal_focus(
         &mut self,
         window_id: WindowId,
         focused_terminal_view_id: Option<EntityId>,
         is_active_window: bool,
         ctx: &mut ModelContext<Self>,
-    ) {
+    ) -> Option<DwellId> {
         self.forget_closed_windows(window_id, ctx);
+        if self
+            .dwells
+            .get(&window_id)
+            .is_some_and(|dwell| Some(dwell.terminal_view_id) != focused_terminal_view_id)
+        {
+            self.dwells.remove(&window_id);
+        }
+        if !is_active_window {
+            return None;
+        }
         let previous = self
             .last_focus_by_window
             .insert(window_id, focused_terminal_view_id);
-        let Some(focused) = focused_terminal_view_id else {
+        let focused = focused_terminal_view_id?;
+        let arrived = previous.is_some_and(|previous| previous != Some(focused));
+        if !arrived || !FeatureFlag::TabMarkUnread.is_enabled() {
+            return None;
+        }
+        let id = DwellId(self.next_dwell_id);
+        self.next_dwell_id += 1;
+        self.dwells.insert(
+            window_id,
+            Dwell {
+                id,
+                terminal_view_id: focused,
+                marked_since_arrival: false,
+            },
+        );
+        Some(id)
+    }
+
+    /// Whether an arrival in `window_id` is waiting out its dwell. While one
+    /// is, focus reports leave the arrived-at view's notifications for the
+    /// dwell to read.
+    pub(crate) fn has_pending_dwell(&self, window_id: WindowId) -> bool {
+        self.dwells.contains_key(&window_id)
+    }
+
+    /// Ends the dwell `dwell_id` once `ARRIVAL_DWELL` has passed, given
+    /// `looking_at`, the terminal in the focused pane of the active tab in the
+    /// active window. If that's still the view the arrival reached, the view's
+    /// manual mark clears, unless it was set after the arrival began, and its
+    /// notifications are read. A dwell that ended early, or that a later
+    /// arrival replaced, does nothing.
+    pub(crate) fn finish_dwell(
+        &mut self,
+        window_id: WindowId,
+        dwell_id: DwellId,
+        looking_at: Option<EntityId>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if !self
+            .dwells
+            .get(&window_id)
+            .is_some_and(|dwell| dwell.id == dwell_id)
+        {
+            return;
+        }
+        let Some(dwell) = self.dwells.remove(&window_id) else {
             return;
         };
-        let arrived =
-            is_active_window && previous.is_some_and(|previous| previous != Some(focused));
-        if arrived && self.manually_unread.remove(&focused) {
+        if looking_at != Some(dwell.terminal_view_id) {
+            return;
+        }
+        if !dwell.marked_since_arrival && self.manually_unread.remove(&dwell.terminal_view_id) {
             ctx.emit(AgentManagementEvent::NotificationUpdated);
+        }
+        self.mark_items_from_terminal_view_read(dwell.terminal_view_id, ctx);
+    }
+
+    /// Notes marks just set on views that focus is dwelling on: newer than
+    /// the arrival, they're left by its dwell.
+    fn note_marks_since_arrival(&mut self, terminal_view_ids: &[EntityId]) {
+        for dwell in self.dwells.values_mut() {
+            if terminal_view_ids.contains(&dwell.terminal_view_id) {
+                dwell.marked_since_arrival = true;
+            }
         }
     }
 
-    /// Drops the focus recorded for windows that have closed, which
-    /// `WindowClosed` doesn't name. A window's workspace is registered from its
-    /// creation until the window closes. The reporting window always stays,
-    /// since it may be reporting from inside its creation, before it's
+    /// Drops the focus and the dwell recorded for windows that have closed,
+    /// which `WindowClosed` doesn't name. A window's workspace is registered
+    /// from its creation until the window closes. The reporting window always
+    /// stays, since it may be reporting from inside its creation, before it's
     /// registered.
     fn forget_closed_windows(&mut self, reporting_window_id: WindowId, app: &AppContext) {
         if !app.has_singleton_model::<WorkspaceRegistry>() {
             return;
         }
         let registry = WorkspaceRegistry::as_ref(app);
-        self.last_focus_by_window.retain(|window_id, _| {
+        let is_open = |window_id: &WindowId| {
             *window_id == reporting_window_id || registry.is_registered(*window_id)
-        });
+        };
+        self.last_focus_by_window
+            .retain(|window_id, _| is_open(window_id));
+        self.dwells.retain(|window_id, _| is_open(window_id));
     }
 
     /// Drops what's held for a terminal view that closed for good, as opposed
@@ -218,6 +320,8 @@ impl AgentNotificationsModel {
     ) {
         let was_marked = self.manually_unread.remove(&terminal_view_id);
         let was_staged = self.staged_unread.remove(&terminal_view_id);
+        self.dwells
+            .retain(|_, dwell| dwell.terminal_view_id != terminal_view_id);
         if was_marked || was_staged {
             ctx.emit(AgentManagementEvent::NotificationUpdated);
         }
@@ -238,18 +342,21 @@ impl AgentNotificationsModel {
     /// Commits the staged marks among `terminal_view_ids` once restore has
     /// activated `window_id`'s tab, taking `focused_terminal_view_id` as that
     /// window's focus baseline. A committed mark shows just as it did staged,
-    /// and from here on it clears like any other.
+    /// and from here on it clears like any other, as a mark set now would.
     pub(crate) fn commit_restored_unread(
         &mut self,
         window_id: WindowId,
         terminal_view_ids: &[EntityId],
         focused_terminal_view_id: Option<EntityId>,
     ) {
+        let mut committed = Vec::new();
         for terminal_view_id in terminal_view_ids {
             if self.staged_unread.remove(terminal_view_id) {
                 self.manually_unread.insert(*terminal_view_id);
+                committed.push(*terminal_view_id);
             }
         }
+        self.note_marks_since_arrival(&committed);
         self.last_focus_by_window
             .insert(window_id, focused_terminal_view_id);
     }
@@ -613,6 +720,27 @@ impl AgentNotificationsModel {
         }
     }
 
+    /// Adds a finished-task notification from `terminal_view_id`, for tests
+    /// outside this module.
+    #[cfg(test)]
+    pub(crate) fn add_notification_for_tests(
+        &mut self,
+        terminal_view_id: EntityId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.add_notification(
+            "Agent task".to_owned(),
+            "Task completed.".to_owned(),
+            NotificationCategory::Complete,
+            NotificationSourceAgent::Oz { is_ambient: false },
+            NotificationOrigin::Conversation(AIConversationId::new()),
+            terminal_view_id,
+            vec![],
+            None,
+            ctx,
+        );
+    }
+
     /// Removes the existing notification for the given source (if any) and emits an update event.
     fn remove_notification_by_source(
         &mut self,
@@ -808,7 +936,7 @@ fn focused_terminal_in_active_window(app: &AppContext) -> Option<EntityId> {
             return focused;
         }
     }
-    let window_id = app.windows().active_window()?;
+    let window_id = active_window_id(app)?;
     if !app.has_singleton_model::<WorkspaceRegistry>() {
         return None;
     }
@@ -818,6 +946,18 @@ fn focused_terminal_in_active_window(app: &AppContext) -> Option<EntityId> {
         .active_tab_focused_terminal_view_id(app)
 }
 
+/// The active window, the key window on macOS: `None` while the app is in the
+/// background.
+pub(crate) fn active_window_id(app: &AppContext) -> Option<WindowId> {
+    #[cfg(test)]
+    {
+        if let Some(window_id) = ACTIVE_WINDOW_FOR_TESTS.with(std::cell::Cell::get) {
+            return Some(window_id);
+        }
+    }
+    app.windows().active_window()
+}
+
 #[cfg(test)]
 thread_local! {
     /// App tests can't make a window active, so a test that needs one names
@@ -825,6 +965,30 @@ thread_local! {
     /// non-terminal pane).
     static ACTIVE_WINDOW_FOCUS_FOR_TESTS: std::cell::Cell<Option<Option<EntityId>>> =
         const { std::cell::Cell::new(None) };
+
+    /// Or, for a test with real workspaces, the window that would be active.
+    static ACTIVE_WINDOW_FOR_TESTS: std::cell::Cell<Option<WindowId>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Makes a window the active one for as long as it lives, since app tests
+/// have no active window of their own.
+#[cfg(test)]
+pub(crate) struct ActiveWindowForTests;
+
+#[cfg(test)]
+impl ActiveWindowForTests {
+    pub(crate) fn set(window_id: WindowId) -> Self {
+        ACTIVE_WINDOW_FOR_TESTS.with(|cell| cell.set(Some(window_id)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for ActiveWindowForTests {
+    fn drop(&mut self) {
+        ACTIVE_WINDOW_FOR_TESTS.with(|cell| cell.set(None));
+    }
 }
 
 #[cfg(test)]

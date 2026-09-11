@@ -7,7 +7,11 @@ pub(crate) mod cloud_setup_guide_view;
 pub(crate) mod telemetry;
 pub(crate) mod view;
 
-pub(crate) use agent_management_model::{AgentManagementEvent, AgentNotificationsModel};
+#[cfg(test)]
+pub(crate) use agent_management_model::ActiveWindowForTests;
+pub(crate) use agent_management_model::{
+    active_window_id, AgentManagementEvent, AgentNotificationsModel, DwellId,
+};
 
 pub fn init(app: &mut warpui::AppContext) {
     view::init(app);

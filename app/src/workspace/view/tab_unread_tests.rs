@@ -8,8 +8,8 @@ use warpui::platform::WindowStyle;
 use warpui::r#async::Timer;
 use warpui::{App, AppContext, EntityId, SingletonEntity as _, View as _, ViewContext, ViewHandle};
 
-use super::{row_shows_unread, tab_is_unread, STAGED_UNREAD_FALLBACK_COMMIT};
-use crate::ai::agent_management::AgentNotificationsModel;
+use super::{row_shows_unread, tab_is_unread, ARRIVAL_DWELL, STAGED_UNREAD_FALLBACK_COMMIT};
+use crate::ai::agent_management::{ActiveWindowForTests, AgentNotificationsModel};
 use crate::app_state::WindowSnapshot;
 use crate::features::FeatureFlag;
 use crate::menu::MenuItem;
@@ -473,9 +473,15 @@ fn a_restored_mark_is_committed_once_restore_activates_its_tab() {
 
             let window_id = ctx.window_id();
             AgentNotificationsModel::handle(ctx).update(ctx, |model, ctx| {
-                model.record_terminal_focus(window_id, Some(restored_view), true, ctx);
+                let dwell = model
+                    .record_terminal_focus(window_id, Some(restored_view), true, ctx)
+                    .expect("an arrival");
+                model.finish_dwell(window_id, dwell, Some(restored_view), ctx);
             });
-            assert!(!is_unread(restored_view, ctx), "an arrival clears it");
+            assert!(
+                !is_unread(restored_view, ctx),
+                "an arrival clears it once focus stays for the dwell"
+            );
         });
     });
 }
@@ -525,4 +531,61 @@ fn every_staged_mark_is_eventually_committed() {
             assert!(is_unread(second, ctx));
         });
     });
+}
+
+/// Focus arriving at a pane reads its notifications at once, as upstream's
+/// does, with TabMarkUnread off. With it on, they're read only once focus has
+/// stayed on the pane for the dwell, so passing through leaves them unread.
+#[test]
+fn an_arrival_reads_notifications_at_once_as_upstream_or_after_the_dwell() {
+    let _mailbox = FeatureFlag::HOANotifications.override_enabled(true);
+    for tab_mark_unread in [false, true] {
+        let _unread = FeatureFlag::TabMarkUnread.override_enabled(tab_mark_unread);
+        App::test((), |mut app| async move {
+            initialize_app(&mut app);
+            let workspace = mock_workspace(&mut app);
+            let second = workspace.update(&mut app, |workspace, ctx| {
+                workspace.add_terminal_tab(false, ctx);
+                focused_terminal_view_id(workspace, 1, ctx)
+            });
+            let window_id = app.read(|ctx| workspace.window_id(ctx));
+            let _active = ActiveWindowForTests::set(window_id);
+            let notify = |app: &mut App| {
+                AgentNotificationsModel::handle(app).update(app, |model, ctx| {
+                    model.add_notification_for_tests(second, ctx);
+                });
+            };
+            let context = format!("TabMarkUnread {tab_mark_unread}");
+
+            // The window's first report in front is its baseline.
+            workspace.update(&mut app, |workspace, ctx| {
+                workspace.activate_tab(1, ctx);
+                workspace.activate_tab(0, ctx);
+            });
+
+            // Focus passes through the second tab.
+            notify(&mut app);
+            workspace.update(&mut app, |workspace, ctx| {
+                workspace.activate_tab(1, ctx);
+                assert_eq!(is_unread(second, ctx), tab_mark_unread, "on arrival, {context}");
+                workspace.activate_tab(0, ctx);
+            });
+            Timer::after(ARRIVAL_DWELL + Duration::from_millis(500)).await;
+            workspace.read(&app, |_, ctx| {
+                assert_eq!(
+                    is_unread(second, ctx),
+                    tab_mark_unread,
+                    "after passing through, {context}"
+                );
+            });
+
+            // Focus stays on it.
+            notify(&mut app);
+            workspace.update(&mut app, |workspace, ctx| workspace.activate_tab(1, ctx));
+            Timer::after(ARRIVAL_DWELL + Duration::from_millis(500)).await;
+            workspace.read(&app, |_, ctx| {
+                assert!(!is_unread(second, ctx), "after the dwell, {context}");
+            });
+        });
+    }
 }

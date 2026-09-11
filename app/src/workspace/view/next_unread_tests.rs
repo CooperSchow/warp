@@ -1,15 +1,17 @@
 use std::collections::HashSet;
+use std::time::Duration;
 
 use settings::Setting as _;
 use warp_errors::report_if_error;
-use warpui::{App, EntityId, SingletonEntity as _, TypedActionView as _, ViewContext};
+use warpui::r#async::Timer;
+use warpui::{App, AppContext, EntityId, SingletonEntity as _, TypedActionView as _, ViewContext};
 
 use super::{next_unread_tab, nowhere_to_jump_message};
-use crate::ai::agent_management::AgentNotificationsModel;
+use crate::ai::agent_management::{ActiveWindowForTests, AgentNotificationsModel};
 use crate::features::FeatureFlag;
 use crate::pane_group::{Direction, PaneId};
 use crate::workspace::tab_settings::{TabSettings, VerticalTabsDisplayGranularity};
-use crate::workspace::view::tab_unread::row_shows_unread;
+use crate::workspace::view::tab_unread::{row_shows_unread, ARRIVAL_DWELL};
 use crate::workspace::view::tests::{initialize_app, mock_workspace};
 use crate::workspace::{Workspace, WorkspaceAction};
 
@@ -319,5 +321,67 @@ fn cmd_j_goes_to_exactly_the_tabs_whose_rows_show_the_dot() {
             });
         }
         assert_eq!(cases, 2 * 2 * 4);
+    });
+}
+
+/// The terminal view in the focused pane of the tab at `tab_index`.
+fn focused_terminal_view(workspace: &Workspace, tab_index: usize, app: &AppContext) -> EntityId {
+    let pane_group = workspace.tabs[tab_index].pane_group.as_ref(app);
+    pane_group
+        .terminal_view_from_pane_id(pane_group.focused_pane_id(app), app)
+        .expect("the tab's focused pane is a terminal")
+        .id()
+}
+
+/// Quick ⌘J presses across marked tabs, as holding the key makes, leave every
+/// tab they pass through marked. The tab they stop on clears once focus has
+/// stayed on it for the dwell, and no other tab does.
+#[test]
+fn quick_cmd_j_presses_leave_the_tabs_they_pass_through_marked() {
+    let _unread = FeatureFlag::TabMarkUnread.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let marked = workspace.update(&mut app, |workspace, ctx| {
+            for _ in 0..3 {
+                workspace.add_terminal_tab(false, ctx);
+            }
+            (1..4)
+                .map(|index| focused_terminal_view(workspace, index, ctx))
+                .collect::<Vec<_>>()
+        });
+        let window_id = app.read(|ctx| workspace.window_id(ctx));
+        let _active = ActiveWindowForTests::set(window_id);
+        let is_unread =
+            |view: EntityId, app: &AppContext| AgentNotificationsModel::as_ref(app).is_unread(view);
+
+        let stops = workspace.update(&mut app, |workspace, ctx| {
+            // The window's first report in front, on tab 0, is its baseline.
+            workspace.activate_tab(0, ctx);
+            set_marks(&[], &marked, ctx);
+            let stops: Vec<usize> = (0..4)
+                .map(|_| {
+                    workspace.handle_action(&WorkspaceAction::JumpToNextUnreadTab, ctx);
+                    workspace.active_tab_index
+                })
+                .collect();
+            assert!(
+                marked.iter().all(|view| is_unread(*view, ctx)),
+                "no quick press clears a tab: stops {stops:?}"
+            );
+            stops
+        });
+
+        Timer::after(ARRIVAL_DWELL + Duration::from_millis(500)).await;
+        let last = *stops.last().expect("four presses");
+        workspace.read(&app, |_, ctx| {
+            for (index, view) in (1..4).zip(&marked) {
+                assert_eq!(
+                    is_unread(*view, ctx),
+                    index != last,
+                    "tab {index}: only the tab the presses stopped on clears, stops {stops:?}"
+                );
+            }
+        });
     });
 }

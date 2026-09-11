@@ -9,7 +9,7 @@ use warpui::r#async::Timer;
 use warpui::{AppContext, EntityId, SingletonEntity, ViewContext, ViewHandle};
 
 use super::Workspace;
-use crate::ai::agent_management::AgentNotificationsModel;
+use crate::ai::agent_management::{active_window_id, AgentNotificationsModel, DwellId};
 use crate::pane_group::{PaneGroup, PaneId};
 use crate::terminal::TerminalView;
 use crate::workspace::tab_settings::VerticalTabsDisplayGranularity;
@@ -18,6 +18,13 @@ use crate::workspace::WorkspaceRegistry;
 /// How long a mark staged after restore's commit waits for the window's first
 /// input before it's committed anyway.
 const STAGED_UNREAD_FALLBACK_COMMIT: Duration = Duration::from_secs(2);
+
+/// How long focus has to stay on a pane it arrived at before the arrival reads
+/// the pane: its manual mark clears and its notifications are read. A held key
+/// repeats many times a second, and stepping through tabs by hand takes a
+/// fraction of a second a tab, so a second passes over both without reading
+/// anything, while stopping to look reads a pane about as soon as it's seen.
+pub(crate) const ARRIVAL_DWELL: Duration = Duration::from_secs(1);
 
 /// The terminal view a vertical tabs row shows for `pane_id`: the pane's own,
 /// or, for a temporary replacement (an expanded code diff, say), that of the
@@ -185,6 +192,29 @@ impl Workspace {
                 Timer::after(STAGED_UNREAD_FALLBACK_COMMIT).await;
             },
             |me, _, ctx| me.commit_straggling_unread_marks(ctx),
+        );
+    }
+
+    /// Ends the dwell an arrival in this window began, once `ARRIVAL_DWELL`
+    /// has passed, with what this window then has focused if it's still the
+    /// active window. The timer belongs to this workspace, like the fallback
+    /// commit's, so it can't fire once the window is gone.
+    pub(super) fn wait_out_arrival_dwell(&self, dwell: DwellId, ctx: &mut ViewContext<Self>) {
+        let window_id = ctx.window_id();
+        ctx.spawn(
+            async {
+                Timer::after(ARRIVAL_DWELL).await;
+            },
+            move |me, _, ctx| {
+                // Read from here rather than through the registry, which can't
+                // reach this workspace while it's the view being updated.
+                let looking_at = (active_window_id(ctx) == Some(window_id))
+                    .then(|| me.active_tab_focused_terminal_view_id(ctx))
+                    .flatten();
+                AgentNotificationsModel::handle(ctx).update(ctx, |model, ctx| {
+                    model.finish_dwell(window_id, dwell, looking_at, ctx);
+                });
+            },
         );
     }
 
