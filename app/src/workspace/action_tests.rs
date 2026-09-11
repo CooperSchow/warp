@@ -80,3 +80,28 @@ fn pane_name_actions_save_workspace_state() {
     // `rename_pane` which mutates `pane_configuration`.
     assert!(WorkspaceAction::RenameActivePane.should_save_app_state_on_action());
 }
+
+#[test]
+fn tab_mark_actions_save_workspace_state() {
+    let pane_group_id = EntityId::new();
+    for action in [
+        WorkspaceAction::SetTabStarred {
+            pane_group_id,
+            starred: true,
+        },
+        WorkspaceAction::ToggleActiveTabStar,
+        WorkspaceAction::SetTabUnread {
+            pane_group_id,
+            terminal_view_id: None,
+            unread: true,
+        },
+        WorkspaceAction::ToggleActiveTabUnread,
+        // Changes the active tab, like the other tab-activation actions.
+        WorkspaceAction::JumpToNextUnreadTab,
+    ] {
+        assert!(
+            action.should_save_app_state_on_action(),
+            "{action:?} should save workspace state"
+        );
+    }
+}

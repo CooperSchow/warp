@@ -149,6 +149,34 @@ fn add_notification_tracks_unread_activity_when_in_app_notifications_are_hidden(
 }
 
 #[test]
+fn is_unread_follows_a_notification_until_it_is_read() {
+    App::test((), |mut app| async move {
+        let _guard = FeatureFlag::HOANotifications.override_enabled(true);
+        let (_history, notifications) = setup_app(&mut app);
+
+        let terminal_view_id = EntityId::new();
+        notifications.update(&mut app, |model, ctx| {
+            assert!(!model.is_unread(terminal_view_id));
+            model.add_notification(
+                "Agent task".to_owned(),
+                "Task completed.".to_owned(),
+                NotificationCategory::Complete,
+                NotificationSourceAgent::Oz { is_ambient: false },
+                NotificationOrigin::Conversation(AIConversationId::new()),
+                terminal_view_id,
+                vec![],
+                None,
+                ctx,
+            );
+            assert!(model.is_unread(terminal_view_id));
+
+            model.mark_items_from_terminal_view_read(terminal_view_id, ctx);
+            assert!(!model.is_unread(terminal_view_id));
+        });
+    });
+}
+
+#[test]
 fn flush_drains_pending_artifacts() {
     App::test((), |mut app| async move {
         let _guard = FeatureFlag::HOANotifications.override_enabled(true);

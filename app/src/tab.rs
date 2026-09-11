@@ -42,6 +42,7 @@ use crate::themes::theme::{AnsiColorIdentifier, Fill as ThemeFill, VerticalGradi
 use crate::ui_components::buttons::icon_button;
 use crate::ui_components::color_dot::{render_color_dot, TAB_COLOR_OPTIONS};
 use crate::ui_components::icons::{Icon, ICON_DIMENSIONS};
+use crate::util::bindings::keybinding_name_to_display_string;
 use crate::util::color::{coloru_with_opacity, Opacity};
 use crate::util::truncation::truncate_from_end;
 use crate::window_settings::WindowSettings;
@@ -49,6 +50,11 @@ use crate::workspace::sync_inputs::SyncedInputState;
 use crate::workspace::tab_group::{TabGroup, TabGroupId};
 use crate::workspace::tab_settings::{
     TabCloseButtonPosition, TabSettings, VerticalTabsDisplayGranularity,
+};
+use crate::workspace::view::starred_tabs::starred_tabs_enabled;
+use crate::workspace::view::tab_unread::{row_shows_unread, tab_unread_terminal_views};
+use crate::workspace::view::{
+    TOGGLE_ACTIVE_TAB_STAR_BINDING_NAME, TOGGLE_ACTIVE_TAB_UNREAD_BINDING_NAME,
 };
 use crate::workspace::{
     PaneViewLocator, TabBarDropTargetData, TabBarLocation, TabContextMenuAnchor, WorkspaceAction,
@@ -81,6 +87,30 @@ fn tab_group_menu_entry_flags(
     let has_other_groups = tab_groups.keys().any(|gid| Some(*gid) != group_id);
     let show_new_group = !(in_group && is_only_member_of_group);
     (show_new_group, has_other_groups, in_group)
+}
+
+/// The label for a bulk close over the tabs at `indices`, or `None` when all of
+/// them are starred and it would close nothing. Starred tabs, the first
+/// `starred_boundary` of the list, are spared, and the label says so.
+pub(crate) fn bulk_close_label(
+    label: &str,
+    indices: impl IntoIterator<Item = usize>,
+    starred_boundary: usize,
+) -> Option<String> {
+    let (spared, closed) = indices
+        .into_iter()
+        .fold((0usize, 0usize), |(spared, closed), index| {
+            if index < starred_boundary {
+                (spared + 1, closed)
+            } else {
+                (spared, closed + 1)
+            }
+        });
+    match (spared, closed) {
+        (_, 0) => None,
+        (0, _) => Some(label.to_owned()),
+        _ => Some(format!("{label} (keep starred)")),
+    }
 }
 
 /// True when the user has opted into vertical tabs and the feature flag is on.
@@ -292,12 +322,15 @@ impl TabData {
             )
     }
 
-    /// Returns the menu items for the context menu on right mouse click.
+    /// Returns the menu items for the context menu on right mouse click. The
+    /// first `starred_boundary` tabs are starred, and the bulk closes spare
+    /// them.
     #[allow(clippy::too_many_arguments)]
     pub fn menu_items(
         &self,
         index: usize,
         tabs_len: usize,
+        starred_boundary: usize,
         tab_groups: &HashMap<TabGroupId, TabGroup>,
         is_only_member_of_group: bool,
         can_move_left: bool,
@@ -307,6 +340,7 @@ impl TabData {
         self.menu_items_with_pane_name_target(
             index,
             tabs_len,
+            starred_boundary,
             tab_groups,
             is_only_member_of_group,
             can_move_left,
@@ -321,6 +355,7 @@ impl TabData {
         &self,
         index: usize,
         tabs_len: usize,
+        starred_boundary: usize,
         tab_groups: &HashMap<TabGroupId, TabGroup>,
         is_only_member_of_group: bool,
         can_move_left: bool,
@@ -333,12 +368,12 @@ impl TabData {
         let mut menu_items = vec![];
 
         for section_items in [
-            self.pin_menu_items(index),
+            self.tab_marks_menu_items(index, pane_name_target, ctx),
             self.tab_group_menu_items(index, tab_groups, is_only_member_of_group),
             self.session_sharing_menu_items(index, ctx),
             self.copy_metadata_menu_items(pane_name_target, ctx),
             self.modify_tab_menu_items(index, can_move_left, can_move_right, pane_name_target, ctx),
-            self.close_tab_menu_items(index, tabs_len, ctx),
+            self.close_tab_menu_items(index, tabs_len, starred_boundary, ctx),
             Self::save_config_menu_items(index),
             self.color_option_menu_items(index, terminal_colors, ctx),
         ] {
@@ -634,10 +669,14 @@ impl TabData {
         menu_items
     }
 
+    /// "Close tab", then the bulk closes. The first `starred_boundary` tabs are
+    /// starred and the bulk closes spare them, so a bulk close left with only
+    /// starred tabs to close is hidden, and one that spares any says so.
     fn close_tab_menu_items(
         &self,
         index: usize,
         tabs_len: usize,
+        starred_boundary: usize,
         ctx: &AppContext,
     ) -> Vec<MenuItem<WorkspaceAction>> {
         let mut menu_items = vec![];
@@ -650,23 +689,26 @@ impl TabData {
                     .into_item(),
             );
         }
-        if tabs_len > 1 {
+        let other_tabs = (0..tabs_len).filter(|other| *other != index);
+        if let Some(label) = bulk_close_label("Close other tabs", other_tabs, starred_boundary) {
             menu_items.push(
-                MenuItemFields::new("Close other tabs")
+                MenuItemFields::new(label)
                     .with_on_select_action(WorkspaceAction::CloseOtherTabs(index))
                     .into_item(),
             );
         }
-        let not_last_tab = index != tabs_len - 1;
-        if not_last_tab {
+        let close_below_label = if uses_vertical_tabs {
+            "Close Tabs Below"
+        } else {
+            "Close Tabs to the Right"
+        };
+        if let Some(label) =
+            bulk_close_label(close_below_label, index + 1..tabs_len, starred_boundary)
+        {
             menu_items.push(
-                MenuItemFields::new(if uses_vertical_tabs {
-                    "Close Tabs Below"
-                } else {
-                    "Close Tabs to the Right"
-                })
-                .with_on_select_action(WorkspaceAction::CloseTabsRight(index))
-                .into_item(),
+                MenuItemFields::new(label)
+                    .with_on_select_action(WorkspaceAction::CloseTabsRight(index))
+                    .into_item(),
             );
         }
         menu_items
@@ -681,20 +723,120 @@ impl TabData {
             .into_item()]
     }
 
-    /// Pin/unpin entry for the per-tab right-click menu.
-    fn pin_menu_items(&self, index: usize) -> Vec<MenuItem<WorkspaceAction>> {
-        if !FeatureFlag::PinnedTabs.is_enabled() {
-            return vec![];
+    /// The tab-marks section that opens the menu: Mark as Unread (or Mark as
+    /// Read), then Star (or Unstar). One builder, so no separator falls between
+    /// the two. Without `StarredTabs`, upstream's Pin / Unpin stands in for Star.
+    fn tab_marks_menu_items(
+        &self,
+        index: usize,
+        pane_name_target: Option<PaneNameMenuTarget>,
+        ctx: &AppContext,
+    ) -> Vec<MenuItem<WorkspaceAction>> {
+        self.unread_menu_item(pane_name_target, ctx)
+            .into_iter()
+            .chain(self.star_menu_item(index, ctx))
+            .collect()
+    }
+
+    /// "Mark as Unread", or "Mark as Read" when the row the menu was opened on
+    /// shows the unread dot. A pane's own row (Panes granularity) targets that
+    /// pane; every other entry point targets the whole tab. Hidden when the
+    /// target has no terminal pane.
+    fn unread_menu_item(
+        &self,
+        pane_name_target: Option<PaneNameMenuTarget>,
+        ctx: &AppContext,
+    ) -> Option<MenuItem<WorkspaceAction>> {
+        if !FeatureFlag::TabMarkUnread.is_enabled() {
+            return None;
+        }
+        let pane_group = self.pane_group.as_ref(ctx);
+        let row_pane_id = pane_name_target
+            .filter(|target| self.pane_group.id() == target.locator.pane_group_id)
+            .map(|target| target.locator.pane_id);
+        let granularity = uses_vertical_tabs(ctx).then(|| {
+            *TabSettings::as_ref(ctx)
+                .vertical_tabs_display_granularity
+                .value()
+        });
+        let (terminal_view_id, is_unread) = match (granularity, row_pane_id) {
+            // A pane's own row: that pane, and that row's dot.
+            (Some(granularity @ VerticalTabsDisplayGranularity::Panes), Some(pane_id)) => {
+                let terminal_view = pane_group.terminal_view_from_pane_id(pane_id, ctx)?;
+                (
+                    Some(terminal_view.id()),
+                    row_shows_unread(pane_group, pane_id, granularity, ctx),
+                )
+            }
+            // A tab's row: the whole tab, and the row's dot.
+            (Some(granularity @ VerticalTabsDisplayGranularity::Tabs), pane_id) => {
+                let pane_id = pane_id.unwrap_or_else(|| pane_group.focused_pane_id(ctx));
+                (
+                    None,
+                    row_shows_unread(pane_group, pane_id, granularity, ctx),
+                )
+            }
+            // No single row: the kebab over a tab's pane rows, or the
+            // horizontal tab bar, which draws no dot. The whole tab.
+            (Some(VerticalTabsDisplayGranularity::Panes), None) | (None, _) => {
+                (None, !tab_unread_terminal_views(pane_group, ctx).is_empty())
+            }
+        };
+        if terminal_view_id.is_none() && pane_group.terminal_views(ctx).is_empty() {
+            return None;
         }
 
-        let (label, action) = if self.pinned {
-            ("Unpin tab", WorkspaceAction::UnpinTab(index))
+        let label = if is_unread {
+            "Mark as Read"
         } else {
-            ("Pin tab", WorkspaceAction::PinTab(index))
+            "Mark as Unread"
         };
-        vec![MenuItemFields::new(label)
-            .with_on_select_action(action)
-            .into_item()]
+        Some(
+            MenuItemFields::new(label)
+                .with_key_shortcut_label(keybinding_name_to_display_string(
+                    TOGGLE_ACTIVE_TAB_UNREAD_BINDING_NAME,
+                    ctx,
+                ))
+                .with_on_select_action(WorkspaceAction::SetTabUnread {
+                    pane_group_id: self.pane_group.id(),
+                    terminal_view_id,
+                    unread: !is_unread,
+                })
+                .into_item(),
+        )
+    }
+
+    /// "Star tab" or "Unstar tab"; upstream's "Pin tab" or "Unpin tab" when
+    /// pins are on but stars are off.
+    fn star_menu_item(&self, index: usize, ctx: &AppContext) -> Option<MenuItem<WorkspaceAction>> {
+        if !FeatureFlag::PinnedTabs.is_enabled() {
+            return None;
+        }
+        let item = if starred_tabs_enabled() {
+            let label = match (self.pinned, self.group_id.is_some()) {
+                (true, _) => "Unstar tab",
+                // Starring pulls a tab out of its group; the label says so up front.
+                (false, true) => "Star tab (leaves group)",
+                (false, false) => "Star tab",
+            };
+            MenuItemFields::new(label)
+                .with_key_shortcut_label(keybinding_name_to_display_string(
+                    TOGGLE_ACTIVE_TAB_STAR_BINDING_NAME,
+                    ctx,
+                ))
+                .with_on_select_action(WorkspaceAction::SetTabStarred {
+                    pane_group_id: self.pane_group.id(),
+                    starred: !self.pinned,
+                })
+        } else {
+            let (label, action) = if self.pinned {
+                ("Unpin tab", WorkspaceAction::UnpinTab(index))
+            } else {
+                ("Pin tab", WorkspaceAction::PinTab(index))
+            };
+            MenuItemFields::new(label).with_on_select_action(action)
+        };
+        Some(item.into_item())
     }
 
     /// Returns the tab-group entries for the top-level right-click menu:

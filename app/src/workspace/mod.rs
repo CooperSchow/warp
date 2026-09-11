@@ -64,11 +64,15 @@ pub use one_time_modal_model::OneTimeModalModel;
 pub use registry::WorkspaceRegistry;
 pub use toast_stack::ToastStack;
 
+use crate::workspace::view::starred_tabs::{active_tab_is_starred, starred_tabs_enabled};
+use crate::workspace::view::tab_unread::active_tab_is_unread;
 use crate::workspace::view::{
-    LEFT_PANEL_AGENT_CONVERSATIONS_BINDING_NAME, LEFT_PANEL_GLOBAL_SEARCH_BINDING_NAME,
-    LEFT_PANEL_PROJECT_EXPLORER_BINDING_NAME, LEFT_PANEL_WARP_DRIVE_BINDING_NAME,
-    NEW_AGENT_TAB_BINDING_NAME, NEW_AMBIENT_AGENT_TAB_BINDING_NAME, NEW_FILE_BINDING_NAME,
-    NEW_TAB_BINDING_NAME, NEW_TERMINAL_TAB_BINDING_NAME, OPEN_GLOBAL_SEARCH_BINDING_NAME,
+    JUMP_TO_NEXT_UNREAD_TAB_BINDING_NAME, LEFT_PANEL_AGENT_CONVERSATIONS_BINDING_NAME,
+    LEFT_PANEL_GLOBAL_SEARCH_BINDING_NAME, LEFT_PANEL_PROJECT_EXPLORER_BINDING_NAME,
+    LEFT_PANEL_WARP_DRIVE_BINDING_NAME, NEW_AGENT_TAB_BINDING_NAME,
+    NEW_AMBIENT_AGENT_TAB_BINDING_NAME, NEW_FILE_BINDING_NAME, NEW_TAB_BINDING_NAME,
+    NEW_TERMINAL_TAB_BINDING_NAME, OPEN_GLOBAL_SEARCH_BINDING_NAME,
+    TOGGLE_ACTIVE_TAB_STAR_BINDING_NAME, TOGGLE_ACTIVE_TAB_UNREAD_BINDING_NAME,
     TOGGLE_CONVERSATION_LIST_VIEW_BINDING_NAME, TOGGLE_NOTIFICATION_MAILBOX_BINDING_NAME,
     TOGGLE_PROJECT_EXPLORER_BINDING_NAME, TOGGLE_RIGHT_PANEL_BINDING_NAME,
     TOGGLE_TAB_CONFIGS_MENU_BINDING_NAME, TOGGLE_VERTICAL_TABS_PANEL_BINDING_NAME,
@@ -1010,14 +1014,17 @@ pub fn init(app: &mut AppContext) {
 
     // Tab/group pinning bindings (keyless by default; gated on `PinnedTabs`).
     // Pin/unpin are split into separate entries so the palette label tracks
-    // the active tab/group's current state.
+    // the active tab/group's current state. With stars on, the star entries
+    // stand in for them, so the palette never offers both "pin" and "star".
     app.register_editable_bindings([
         EditableBinding::new(
             "workspace:pin_active_tab",
             "Pin current tab",
             WorkspaceAction::PinActiveTab,
         )
-        .with_enabled(|| FeatureFlag::PinnedTabs.is_enabled())
+        .with_enabled(|| {
+            FeatureFlag::PinnedTabs.is_enabled() && !FeatureFlag::StarredTabs.is_enabled()
+        })
         .with_group(bindings::BindingGroup::Navigation.as_str())
         .with_context_predicate(
             id!("Workspace") & !id!("Workspace_ActiveTabPinned") & !id!("Workspace_PaneDragging"),
@@ -1027,7 +1034,9 @@ pub fn init(app: &mut AppContext) {
             "Unpin current tab",
             WorkspaceAction::UnpinActiveTab,
         )
-        .with_enabled(|| FeatureFlag::PinnedTabs.is_enabled())
+        .with_enabled(|| {
+            FeatureFlag::PinnedTabs.is_enabled() && !FeatureFlag::StarredTabs.is_enabled()
+        })
         .with_group(bindings::BindingGroup::Navigation.as_str())
         .with_context_predicate(
             id!("Workspace") & id!("Workspace_ActiveTabPinned") & !id!("Workspace_PaneDragging"),
@@ -1038,7 +1047,9 @@ pub fn init(app: &mut AppContext) {
             WorkspaceAction::PinActiveTabGroup,
         )
         .with_enabled(|| {
-            FeatureFlag::PinnedTabs.is_enabled() && FeatureFlag::GroupedTabs.is_enabled()
+            FeatureFlag::PinnedTabs.is_enabled()
+                && !FeatureFlag::StarredTabs.is_enabled()
+                && FeatureFlag::GroupedTabs.is_enabled()
         })
         .with_group(bindings::BindingGroup::Navigation.as_str())
         .with_context_predicate(
@@ -1053,7 +1064,9 @@ pub fn init(app: &mut AppContext) {
             WorkspaceAction::UnpinActiveTabGroup,
         )
         .with_enabled(|| {
-            FeatureFlag::PinnedTabs.is_enabled() && FeatureFlag::GroupedTabs.is_enabled()
+            FeatureFlag::PinnedTabs.is_enabled()
+                && !FeatureFlag::StarredTabs.is_enabled()
+                && FeatureFlag::GroupedTabs.is_enabled()
         })
         .with_group(bindings::BindingGroup::Navigation.as_str())
         .with_context_predicate(
@@ -1062,6 +1075,70 @@ pub fn init(app: &mut AppContext) {
                 & id!("Workspace_ActiveTabGroupPinned")
                 & !id!("Workspace_PaneDragging"),
         ),
+        EditableBinding::new(
+            "workspace:star_active_tab_group",
+            "Star current tab group",
+            WorkspaceAction::PinActiveTabGroup,
+        )
+        .with_enabled(|| starred_tabs_enabled() && FeatureFlag::GroupedTabs.is_enabled())
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_context_predicate(
+            id!("Workspace")
+                & id!("Workspace_ActiveTabInGroup")
+                & !id!("Workspace_ActiveTabGroupPinned")
+                & !id!("Workspace_PaneDragging"),
+        ),
+        EditableBinding::new(
+            "workspace:unstar_active_tab_group",
+            "Unstar current tab group",
+            WorkspaceAction::UnpinActiveTabGroup,
+        )
+        .with_enabled(|| starred_tabs_enabled() && FeatureFlag::GroupedTabs.is_enabled())
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_context_predicate(
+            id!("Workspace")
+                & id!("Workspace_ActiveTabInGroup")
+                & id!("Workspace_ActiveTabGroupPinned")
+                & !id!("Workspace_PaneDragging"),
+        ),
+    ]);
+
+    // Tab marks (Eqho fork): Mark as Unread, Star, and a jump to the next
+    // unread tab. macOS defaults only: ⌃⌘ has no counterpart elsewhere, and
+    // Ctrl-J is a newline in a terminal. The toggles' palette labels follow
+    // the active tab.
+    app.register_editable_bindings([
+        EditableBinding::new(
+            TOGGLE_ACTIVE_TAB_UNREAD_BINDING_NAME,
+            BindingDescription::new("Mark current tab as unread").with_dynamic_override(|ctx| {
+                active_tab_is_unread(ctx).then(|| "mark current tab as read".into())
+            }),
+            WorkspaceAction::ToggleActiveTabUnread,
+        )
+        .with_enabled(|| FeatureFlag::TabMarkUnread.is_enabled())
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_context_predicate(id!("Workspace") & !id!("Workspace_PaneDragging"))
+        .with_mac_key_binding("cmd-ctrl-u"),
+        EditableBinding::new(
+            TOGGLE_ACTIVE_TAB_STAR_BINDING_NAME,
+            BindingDescription::new("Star current tab").with_dynamic_override(|ctx| {
+                active_tab_is_starred(ctx).then(|| "unstar current tab".into())
+            }),
+            WorkspaceAction::ToggleActiveTabStar,
+        )
+        .with_enabled(starred_tabs_enabled)
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_context_predicate(id!("Workspace") & !id!("Workspace_PaneDragging"))
+        .with_mac_key_binding("cmd-ctrl-s"),
+        EditableBinding::new(
+            JUMP_TO_NEXT_UNREAD_TAB_BINDING_NAME,
+            "Jump to next unread tab",
+            WorkspaceAction::JumpToNextUnreadTab,
+        )
+        .with_enabled(|| FeatureFlag::TabMarkUnread.is_enabled())
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_context_predicate(id!("Workspace") & !id!("Workspace_PaneDragging"))
+        .with_mac_key_binding("cmd-j"),
     ]);
 
     app.register_editable_bindings([
@@ -1096,7 +1173,9 @@ pub fn init(app: &mut AppContext) {
         ),
         EditableBinding::new(
             "workspace:close_other_tabs",
-            "Close other tabs",
+            BindingDescription::new("Close other tabs").with_dynamic_override(|_| {
+                starred_tabs_enabled().then(|| "close other tabs (keep starred)".into())
+            }),
             WorkspaceAction::CloseNonActiveTabs,
         )
         .with_custom_action(CustomAction::CloseOtherTabs)
@@ -1105,7 +1184,13 @@ pub fn init(app: &mut AppContext) {
         EditableBinding::new(
             "workspace:close_tabs_right_active_tab",
             BindingDescription::new("Close tabs to the right").with_dynamic_override(|ctx| {
-                uses_vertical_tabs(ctx).then(|| "close tabs below".into())
+                let description = match (uses_vertical_tabs(ctx), starred_tabs_enabled()) {
+                    (false, false) => return None,
+                    (true, false) => "close tabs below",
+                    (false, true) => "close tabs to the right (keep starred)",
+                    (true, true) => "close tabs below (keep starred)",
+                };
+                Some(description.into())
             }),
             WorkspaceAction::CloseTabsRightActiveTab,
         )
@@ -1730,3 +1815,7 @@ impl DropTargetData for VerticalTabsPaneDropTargetData {
         self
     }
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;

@@ -10,12 +10,16 @@ pub(crate) mod free_ai_removal_modal;
 pub mod global_search;
 pub(crate) mod launch_modal;
 pub(crate) mod left_panel;
+mod next_unread;
 pub(crate) mod onboarding;
 pub(crate) mod openwarp_launch_modal;
 pub(crate) mod orchestration_launch_modal;
 pub(crate) mod right_panel;
+pub(crate) mod starred_tabs;
+mod starred_zone;
 mod startup_directory;
 mod tab_grouping;
+pub(crate) mod tab_unread;
 #[cfg(test)]
 #[path = "view_tests.rs"]
 pub(crate) mod tests;
@@ -356,7 +360,8 @@ use crate::settings_view::{flags, SettingsSection, SettingsView, SettingsViewEve
 #[cfg(all(target_os = "windows", feature = "local_tty"))]
 use crate::shell_indicator::ShellIndicatorType;
 use crate::tab::{
-    color_picker_menu_items, tab_color_palette, tab_position_id, uses_vertical_tabs,
+    bulk_close_label, color_picker_menu_items, tab_color_palette, tab_position_id,
+    uses_vertical_tabs,
     ColorPickerTarget,
     NewSessionMenuItem, PaneNameMenuTarget, SelectedTabColor, TabColor, TabBarState, TabComponent,
     TabData,
@@ -634,6 +639,9 @@ const NOTIFICATIONS_MAILBOX_POSITION_ID: &str = "workspace:notifications_mailbox
 pub(crate) const JUMP_TO_LATEST_TOAST_BINDING_NAME: &str = "workspace:jump_to_latest_toast";
 pub(crate) const TOGGLE_NOTIFICATION_MAILBOX_BINDING_NAME: &str =
     "workspace:toggle_notification_mailbox";
+pub(crate) const TOGGLE_ACTIVE_TAB_UNREAD_BINDING_NAME: &str = "workspace:toggle_active_tab_unread";
+pub(crate) const TOGGLE_ACTIVE_TAB_STAR_BINDING_NAME: &str = "workspace:toggle_active_tab_star";
+pub(crate) const JUMP_TO_NEXT_UNREAD_TAB_BINDING_NAME: &str = "workspace:jump_to_next_unread_tab";
 
 // these won't have to be public after we deprecate the code mode v1 project explorer which is defined in terminal
 pub(crate) const TOGGLE_PROJECT_EXPLORER_BINDING_NAME: &str = "workspace:toggle_project_explorer";
@@ -4182,6 +4190,7 @@ impl Workspace {
                 }
 
                 self.activate_tab_internal(active_tab_index, ctx);
+                self.commit_restored_unread_marks(ctx);
                 self.check_and_trigger_onboarding(ctx);
             }
             NewWorkspaceSource::FromTemplate { window_template } => {
@@ -5548,6 +5557,7 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         let window_id = ctx.window_id();
+        let is_active_window = ctx.windows().active_window() == Some(window_id);
         ActiveAgentViewsModel::handle(ctx).update(ctx, |model, ctx| {
             model.handle_pane_focus_change(
                 window_id,
@@ -5556,14 +5566,29 @@ impl Workspace {
                 ctx,
             );
         });
-        if let Some(terminal_view_id) = focused_terminal_view_id {
-            let is_active_window = ctx.windows().active_window() == Some(ctx.window_id());
-            if is_active_window {
-                AgentNotificationsModel::handle(ctx).update(ctx, |model, ctx| {
+        // Unread marks see focus through one resolver, whatever this caller
+        // reports: the deferred report for a new pane group names the tab's
+        // active session while the others name its focused pane, and a
+        // disagreement between the two would look like an arrival and clear a
+        // mark. Every report is recorded, `None` and inactive windows included.
+        let focused_for_marks = self.active_tab_focused_terminal_view_id(ctx);
+        AgentNotificationsModel::handle(ctx).update(ctx, |model, ctx| {
+            model.record_terminal_focus(window_id, focused_for_marks, is_active_window, ctx);
+            if let Some(terminal_view_id) = focused_terminal_view_id {
+                if is_active_window {
                     model.mark_items_from_terminal_view_read(terminal_view_id, ctx);
-                });
+                }
             }
-        }
+        });
+    }
+
+    /// The terminal view in the active tab's focused pane, or `None` when that
+    /// pane isn't a terminal.
+    pub(crate) fn active_tab_focused_terminal_view_id(&self, ctx: &AppContext) -> Option<EntityId> {
+        let pane_group = self.active_tab_pane_group().as_ref(ctx);
+        pane_group
+            .terminal_view_from_pane_id(pane_group.focused_pane_id(ctx), ctx)
+            .map(|terminal_view| terminal_view.id())
     }
 
     /// Change the active tab index. This must be used instead of setting `self.active_tab_index`
@@ -5590,12 +5615,7 @@ impl Workspace {
             self.tab_mru_order.retain(|id| *id != pane_group_id);
             self.tab_mru_order.insert(0, pane_group_id);
         }
-        if self.vertical_tabs_panel_open
-            && FeatureFlag::VerticalTabs.is_enabled()
-            && *TabSettings::as_ref(ctx).use_vertical_tabs
-        {
-            self.vertical_tabs_panel.scroll_to_tab(index);
-        }
+        self.reveal_tab_in_vertical_panel(index, ctx);
 
         if self.left_panel_visibility_across_tabs_enabled(ctx) {
             self.reconcile_left_panel_open_for_active_tab(ctx);
@@ -7648,7 +7668,7 @@ impl Workspace {
             return;
         };
         let indices: Vec<usize> = (0..self.tabs.len())
-            .filter(|i| self.tabs[*i].group_id != Some(group_id))
+            .filter(|i| self.tabs[*i].group_id != Some(group_id) && !self.bulk_close_spares(*i))
             .collect();
         if indices.is_empty() {
             return;
@@ -7894,6 +7914,7 @@ impl Workspace {
             tab.menu_items(
                 tab_index,
                 self.tabs.len(),
+                self.starred_boundary(),
                 &self.tab_groups,
                 is_only_member_of_group,
                 can_move_left,
@@ -7980,6 +8001,7 @@ impl Workspace {
         let menu_items = tab.menu_items_with_pane_name_target(
             tab_index,
             self.tabs.len(),
+            self.starred_boundary(),
             &self.tab_groups,
             is_only_member_of_group,
             can_move_left,
@@ -10012,7 +10034,6 @@ impl Workspace {
         };
         let has_tabs_above = first > 0;
         let has_tabs_below = last + 1 < self.tabs.len();
-        let has_tabs_outside = (last - first + 1) < self.tabs.len();
         // Move entries are hidden when the move would cross the
         // pinned/unpinned boundary, or go beyond the tab list bounds
         // so the user never sees an option that would be a no-op.
@@ -10048,35 +10069,46 @@ impl Workspace {
             items
         };
 
+        // Bulk closes spare starred tabs, so each one shows only while it has
+        // something to close, and says so when it spares a starred tab.
+        let starred_boundary = self.starred_boundary();
         let close_section = {
             let mut items = vec![MenuItemFields::new("Close all tabs in group")
                 .with_on_select_action(WorkspaceAction::CloseTabGroup(group_id))
                 .into_item()];
-            if has_tabs_outside {
+            let tabs_outside =
+                (0..self.tabs.len()).filter(|index| self.tabs[*index].group_id != Some(group_id));
+            if let Some(label) =
+                bulk_close_label("Close other tabs", tabs_outside, starred_boundary)
+            {
                 items.push(
-                    MenuItemFields::new("Close other tabs")
+                    MenuItemFields::new(label)
                         .with_on_select_action(WorkspaceAction::CloseTabsOutsideGroup(group_id))
                         .into_item(),
                 );
             }
-            if has_tabs_above {
-                let label = if is_vertical {
-                    "Close tabs above"
-                } else {
-                    "Close tabs to the left"
-                };
+            let close_above_label = if is_vertical {
+                "Close tabs above"
+            } else {
+                "Close tabs to the left"
+            };
+            if let Some(label) = bulk_close_label(close_above_label, 0..first, starred_boundary) {
                 items.push(
                     MenuItemFields::new(label)
                         .with_on_select_action(WorkspaceAction::CloseTabsAboveGroup(group_id))
                         .into_item(),
                 );
             }
-            if has_tabs_below {
-                let label = if is_vertical {
-                    "Close tabs below"
-                } else {
-                    "Close tabs to the right"
-                };
+            let close_below_label = if is_vertical {
+                "Close tabs below"
+            } else {
+                "Close tabs to the right"
+            };
+            if let Some(label) = bulk_close_label(
+                close_below_label,
+                last + 1..self.tabs.len(),
+                starred_boundary,
+            ) {
                 items.push(
                     MenuItemFields::new(label)
                         .with_on_select_action(WorkspaceAction::CloseTabsBelowGroup(group_id))
@@ -10087,10 +10119,17 @@ impl Workspace {
         };
 
         let pin_section = if FeatureFlag::PinnedTabs.is_enabled() {
-            let (label, action) = if self.tab_groups.get(&group_id).is_some_and(|g| g.pinned) {
-                ("Unpin group", WorkspaceAction::UnpinTabGroup(group_id))
+            let is_pinned = self.tab_groups.get(&group_id).is_some_and(|g| g.pinned);
+            let label = match (is_pinned, starred_tabs::starred_tabs_enabled()) {
+                (true, true) => "Unstar group",
+                (true, false) => "Unpin group",
+                (false, true) => "Star group",
+                (false, false) => "Pin group",
+            };
+            let action = if is_pinned {
+                WorkspaceAction::UnpinTabGroup(group_id)
             } else {
-                ("Pin group", WorkspaceAction::PinTabGroup(group_id))
+                WorkspaceAction::PinTabGroup(group_id)
             };
             vec![MenuItemFields::new(label)
                 .with_on_select_action(action)
@@ -12284,11 +12323,14 @@ impl Workspace {
         skip_confirmation: bool,
         ctx: &mut ViewContext<Self>,
     ) {
-        // Figure out what indices we want to delete for the "other tabs" case.
-        let indices_to_remove = (0..self.tabs.len()).filter(|i| *i != index);
+        // Figure out what indices we want to delete for the "other tabs" case,
+        // sparing starred tabs.
+        let indices_to_remove = (0..self.tabs.len())
+            .filter(|i| *i != index && !self.bulk_close_spares(*i))
+            .collect_vec();
 
         let tabs_closed = self.close_tabs(
-            indices_to_remove,
+            indices_to_remove.into_iter(),
             OpenDialogSource::CloseOtherTabs { tab_index: index },
             skip_confirmation,
             true,
@@ -12318,9 +12360,11 @@ impl Workspace {
         let indices_to_remove = match direction {
             TabMovement::Left => 0..index,
             TabMovement::Right => (index + 1)..self.tabs.len(),
-        };
+        }
+        .filter(|i| !self.bulk_close_spares(*i))
+        .collect_vec();
         let tabs_closed = self.close_tabs(
-            indices_to_remove,
+            indices_to_remove.into_iter(),
             OpenDialogSource::CloseTabsDirection {
                 tab_index: index,
                 direction,
@@ -24176,6 +24220,18 @@ impl TypedActionView for Workspace {
             CloseTabsOutsideGroup(group_id) => self.close_tabs_outside_group(*group_id, ctx),
             CloseTabsAboveGroup(group_id) => self.close_tabs_above_group(*group_id, ctx),
             CloseTabsBelowGroup(group_id) => self.close_tabs_below_group(*group_id, ctx),
+            SetTabStarred {
+                pane_group_id,
+                starred,
+            } => self.set_tab_starred(*pane_group_id, *starred, ctx),
+            ToggleActiveTabStar => self.toggle_active_tab_star(ctx),
+            SetTabUnread {
+                pane_group_id,
+                terminal_view_id,
+                unread,
+            } => self.set_tab_unread(*pane_group_id, *terminal_view_id, *unread, ctx),
+            ToggleActiveTabUnread => self.toggle_active_tab_unread(ctx),
+            JumpToNextUnreadTab => self.jump_to_next_unread_tab(ctx),
             PinTab(tab_index) => self.pin_tab(*tab_index, ctx),
             UnpinTab(tab_index) => self.unpin_tab(*tab_index, ctx),
             PinActiveTab => self.pin_tab(self.active_tab_index, ctx),
@@ -29395,7 +29451,7 @@ const GROUP_HEADER_PIN_PADDING: f32 = GROUP_HEADER_PIN_EDGE_GAP + TAB_PIN_INDICA
 fn render_horizontal_group_pin_indicator(appearance: &Appearance) -> Box<dyn Element> {
     let theme = appearance.theme();
     ConstrainedBox::new(
-        Icon::PinFilledDiagonal
+        starred_tabs::pin_or_star_icon()
             .to_warpui_icon(theme.main_text_color(theme.background()))
             .finish(),
     )

@@ -1,7 +1,16 @@
 use std::collections::HashMap;
 
-use super::tab_group_menu_entry_flags;
+use settings::Setting as _;
+use warp_errors::report_if_error;
+use warpui::{App, AppContext, SingletonEntity as _};
+
+use super::{bulk_close_label, tab_group_menu_entry_flags, PaneNameMenuTarget};
+use crate::features::FeatureFlag;
+use crate::menu::MenuItem;
 use crate::workspace::tab_group::{TabGroup, TabGroupId};
+use crate::workspace::tab_settings::{TabSettings, VerticalTabsDisplayGranularity};
+use crate::workspace::view::tests::{initialize_app, mock_workspace};
+use crate::workspace::{PaneViewLocator, Workspace, WorkspaceAction};
 
 /// Build a `tab_groups` map containing exactly the given group ids.
 fn groups(ids: &[TabGroupId]) -> HashMap<TabGroupId, TabGroup> {
@@ -88,4 +97,186 @@ fn move_to_group_only_shown_when_other_groups_exist() {
     // Ungrouped tab with an existing group: offer "Move to group".
     let (_n, move_ungrouped, _r) = tab_group_menu_entry_flags(None, &groups(&[other]), false);
     assert!(move_ungrouped);
+}
+
+/// One string per menu item: its label, `---` for a separator, and
+/// `(custom row)` for an item that draws its own label, like the color row.
+fn menu_labels(items: &[MenuItem<WorkspaceAction>]) -> Vec<String> {
+    let label = |label: &str| {
+        if label.is_empty() {
+            "(custom row)".to_owned()
+        } else {
+            label.to_owned()
+        }
+    };
+    items
+        .iter()
+        .map(|item| match item {
+            MenuItem::Item(fields) => label(fields.label()),
+            MenuItem::Submenu { fields, .. } => label(fields.label()),
+            MenuItem::Header { fields, .. } => label(fields.label()),
+            MenuItem::ItemsRow { items } => items
+                .iter()
+                .map(|fields| label(fields.label()))
+                .collect::<Vec<_>>()
+                .join(" | "),
+            MenuItem::Separator => "---".to_owned(),
+        })
+        .collect()
+}
+
+/// With the tab-mark flags off, the tab menu reads exactly as it did before
+/// tab marks existed. The fixture holds the labels captured at 7329f56f, one
+/// line per case: `mode|tabs|index|pane target|labels`.
+#[test]
+fn tab_menu_is_unchanged_with_tab_mark_flags_off() {
+    let _pins = FeatureFlag::PinnedTabs.override_enabled(false);
+    let _stars = FeatureFlag::StarredTabs.override_enabled(false);
+    let _unread = FeatureFlag::TabMarkUnread.override_enabled(false);
+    // The rest of the menu, as every WarpOSS build has it.
+    let _vertical_tabs = FeatureFlag::VerticalTabs.override_enabled(true);
+    let _groups = FeatureFlag::GroupedTabs.override_enabled(true);
+    let _configs = FeatureFlag::TabConfigs.override_enabled(true);
+    let _colors = FeatureFlag::DirectoryTabColors.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let mut cases = vec![];
+        for (mode, vertical, granularity) in [
+            ("horizontal", false, VerticalTabsDisplayGranularity::Tabs),
+            ("vertical tabs", true, VerticalTabsDisplayGranularity::Tabs),
+            (
+                "vertical panes",
+                true,
+                VerticalTabsDisplayGranularity::Panes,
+            ),
+        ] {
+            TabSettings::handle(&app).update(&mut app, |settings, ctx| {
+                report_if_error!(settings.use_vertical_tabs.set_value(vertical, ctx));
+                report_if_error!(settings
+                    .vertical_tabs_display_granularity
+                    .set_value(granularity, ctx));
+            });
+            for tab_count in [1, 2, 8] {
+                let workspace = mock_workspace(&mut app);
+                workspace.update(&mut app, |workspace, ctx| {
+                    while workspace.tab_count() < tab_count {
+                        workspace.add_terminal_tab(false, ctx);
+                    }
+                    let mut indices = vec![0, 3.min(tab_count - 1), tab_count - 1];
+                    indices.dedup();
+                    for index in indices {
+                        let tab = &workspace.tabs[index];
+                        let locator = PaneViewLocator {
+                            pane_group_id: tab.pane_group.id(),
+                            pane_id: tab.pane_group.as_ref(ctx).focused_pane_id(ctx),
+                        };
+                        for (target, pane_name_target) in [
+                            ("none", None),
+                            (
+                                "active",
+                                Some(PaneNameMenuTarget {
+                                    locator,
+                                    rename_label: "Rename active pane",
+                                    reset_label: "Reset active pane name",
+                                }),
+                            ),
+                            (
+                                "clicked",
+                                Some(PaneNameMenuTarget {
+                                    locator,
+                                    rename_label: "Rename pane",
+                                    reset_label: "Reset pane name",
+                                }),
+                            ),
+                        ] {
+                            let items = tab.menu_items_with_pane_name_target(
+                                index,
+                                tab_count,
+                                0,
+                                &HashMap::new(),
+                                false,
+                                index > 0,
+                                index + 1 < tab_count,
+                                pane_name_target,
+                                ctx,
+                            );
+                            cases.push(format!(
+                                "{mode}|{tab_count}|{index}|{target}|{}",
+                                menu_labels(&items).join(" ; ")
+                            ));
+                        }
+                    }
+                });
+            }
+        }
+
+        let expected: Vec<&str> = include_str!("../test_data/tab_menu_labels_before_tab_marks.txt")
+            .lines()
+            .collect();
+        assert_eq!(cases.len(), expected.len());
+        for (case, expected) in cases.iter().zip(expected) {
+            assert_eq!(case, expected);
+        }
+    });
+}
+
+/// With the flags on, the menu opens with the tab-marks section: Mark as
+/// Unread, then the star item, with no separator between them.
+#[test]
+fn tab_marks_section_opens_the_menu() {
+    let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
+    let _stars = FeatureFlag::StarredTabs.override_enabled(true);
+    let _unread = FeatureFlag::TabMarkUnread.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            let opening_items = |workspace: &Workspace, ctx: &AppContext| {
+                let items = workspace.tabs[0].menu_items(
+                    0,
+                    1,
+                    0,
+                    &HashMap::new(),
+                    false,
+                    false,
+                    false,
+                    ctx,
+                );
+                menu_labels(&items).into_iter().take(3).collect::<Vec<_>>()
+            };
+            assert_eq!(
+                opening_items(workspace, ctx),
+                ["Mark as Unread", "Star tab", "---"]
+            );
+
+            workspace.tabs[0].group_id = Some(TabGroupId::new());
+            assert_eq!(opening_items(workspace, ctx)[1], "Star tab (leaves group)");
+
+            workspace.tabs[0].group_id = None;
+            workspace.tabs[0].pinned = true;
+            assert_eq!(opening_items(workspace, ctx)[1], "Unstar tab");
+        });
+    });
+}
+
+#[test]
+fn bulk_closes_spare_starred_tabs_and_say_so() {
+    // Tabs 0 and 1 are starred.
+    assert_eq!(
+        bulk_close_label("Close other tabs", [1, 2, 3], 2).as_deref(),
+        Some("Close other tabs (keep starred)")
+    );
+    assert_eq!(
+        bulk_close_label("Close Tabs Below", 1..4, 2).as_deref(),
+        Some("Close Tabs Below (keep starred)")
+    );
+    assert_eq!(
+        bulk_close_label("Close Tabs Below", 2..4, 2).as_deref(),
+        Some("Close Tabs Below")
+    );
+    // Only starred tabs in range, so the close would do nothing: hidden.
+    assert_eq!(bulk_close_label("Close other tabs", [1], 2), None);
+    assert_eq!(bulk_close_label("Close Tabs Below", 4..4, 2), None);
 }

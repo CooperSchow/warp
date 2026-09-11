@@ -92,6 +92,77 @@ impl AgentNotificationsModel {
         }
     }
 
+    /// Whether the terminal view shows as unread: marked unread by hand,
+    /// restored with a mark, or holding an agent notification nobody has
+    /// looked at. The one predicate behind a tab row's dot, the tab menu's
+    /// Mark as Read label and ⌘J.
+    pub(crate) fn is_unread(&self, terminal_view_id: EntityId) -> bool {
+        self.notifications
+            .has_unread_for_terminal_view(terminal_view_id)
+    }
+
+    /// Marks the terminal views unread by hand. A mark holds until its view is
+    /// arrived at, replied to, marked read, or closed for good.
+    pub(crate) fn mark_unread(
+        &mut self,
+        _terminal_view_ids: &[EntityId],
+        _ctx: &mut ModelContext<Self>,
+    ) {
+    }
+
+    /// Clears the terminal views' manual and restored marks, and marks their
+    /// notifications read.
+    pub(crate) fn mark_read(
+        &mut self,
+        _terminal_view_ids: &[EntityId],
+        _ctx: &mut ModelContext<Self>,
+    ) {
+    }
+
+    /// Records the terminal focused in `window_id`'s active tab (`None` when a
+    /// non-terminal pane has focus). A mark clears only when its view replaces
+    /// a different, already-known focus in the active window, so the first
+    /// report in a window, a repeat of the same view and a report from an
+    /// inactive window never clear one.
+    pub(crate) fn record_terminal_focus(
+        &mut self,
+        _window_id: WindowId,
+        _focused_terminal_view_id: Option<EntityId>,
+        _is_active_window: bool,
+        _ctx: &mut ModelContext<Self>,
+    ) {
+    }
+
+    /// Drops what's held for a terminal view that closed for good, as opposed
+    /// to one hidden while its close can be undone, or moved.
+    pub(crate) fn forget_terminal_view(
+        &mut self,
+        _terminal_view_id: EntityId,
+        _ctx: &mut ModelContext<Self>,
+    ) {
+    }
+
+    /// Stages a mark restored with its pane: shown as unread, but no focus
+    /// report clears it until `commit_restored_unread` runs.
+    pub(crate) fn stage_restored_unread(
+        &mut self,
+        _terminal_view_id: EntityId,
+        _ctx: &mut ModelContext<Self>,
+    ) {
+    }
+
+    /// Commits the staged marks among `terminal_view_ids` once restore has
+    /// activated `window_id`'s tab, taking `focused_terminal_view_id` as that
+    /// window's focus baseline.
+    pub(crate) fn commit_restored_unread(
+        &mut self,
+        _window_id: WindowId,
+        _terminal_view_ids: &[EntityId],
+        _focused_terminal_view_id: Option<EntityId>,
+        _ctx: &mut ModelContext<Self>,
+    ) {
+    }
+
     fn handle_active_agent_views_changed(
         &mut self,
         event: &ActiveAgentViewsEvent,

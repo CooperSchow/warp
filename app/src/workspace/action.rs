@@ -257,6 +257,27 @@ pub enum WorkspaceAction {
     PinActiveTabGroup,
     /// Unpins the active tab's group.
     UnpinActiveTabGroup,
+    /// Stars or unstars the tab that owns `pane_group_id`. Carries the tab's
+    /// identity and the target state rather than an index or a toggle, so a
+    /// menu opened before the tabs moved still acts on the tab it was opened
+    /// for.
+    SetTabStarred {
+        pane_group_id: EntityId,
+        starred: bool,
+    },
+    /// Stars the active tab, or unstars it if it's starred.
+    ToggleActiveTabStar,
+    /// Marks the tab that owns `pane_group_id` unread or read: just the pane
+    /// showing `terminal_view_id`, or the whole tab when that's `None`.
+    SetTabUnread {
+        pane_group_id: EntityId,
+        terminal_view_id: Option<EntityId>,
+        unread: bool,
+    },
+    /// Marks the active tab unread, or read if it has an unread pane.
+    ToggleActiveTabUnread,
+    /// Activates the topmost unread tab other than the active one.
+    JumpToNextUnreadTab,
     AddDefaultTab,
     AddTerminalTab {
         hide_homepage: bool,
@@ -976,6 +997,11 @@ impl WorkspaceAction {
             | UnpinTabGroup(_)
             | PinActiveTabGroup
             | UnpinActiveTabGroup
+            | SetTabStarred { .. }
+            | ToggleActiveTabStar
+            | SetTabUnread { .. }
+            | ToggleActiveTabUnread
+            | JumpToNextUnreadTab
             | ToggleTabColor { .. }
             | ToggleTabGroupColor { .. }
             | AddDefaultTab
