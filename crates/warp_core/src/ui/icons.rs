@@ -323,6 +323,9 @@ pub enum Icon {
     /// The starred-tab mark: a solid five-point star, drawn on a 20-unit grid
     /// for its 10 px size.
     StarFilled,
+    /// The add-emoji button in a tab's hover controls: a smiling face with a
+    /// plus at its upper right, like Slack's add-reaction button.
+    FaceSmilePlus,
     Atom,
     Cognition,
     Dataflow04,
@@ -349,6 +352,7 @@ impl From<Icon> for &'static str {
             Icon::PinFilled => "bundled/svg/pin-filled.svg",
             Icon::PinFilledDiagonal => "bundled/svg/pin-filled-diagonal.svg",
             Icon::StarFilled => "bundled/svg/star-filled.svg",
+            Icon::FaceSmilePlus => "bundled/svg/face-smile-plus.svg",
             Icon::AtSign => "bundled/svg/at-sign.svg",
             Icon::Plus => "bundled/svg/plus.svg",
             Icon::Copy => "bundled/svg/copy.svg",

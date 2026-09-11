@@ -330,6 +330,7 @@ fn test_deduplicate_no_snapshots() {
 fn test_terminal_window_snapshot(vertical_tabs_panel_open: bool) -> WindowSnapshot {
     WindowSnapshot {
         tabs: vec![TabSnapshot {
+            tags: Vec::new(),
             custom_title: None,
             root: PaneNodeSnapshot::Leaf(LeafSnapshot {
                 is_focused: true,
@@ -419,6 +420,7 @@ fn test_sqlite_round_trips_custom_vertical_tabs_title() {
     let app_state = AppState {
         windows: vec![WindowSnapshot {
             tabs: vec![TabSnapshot {
+                tags: Vec::new(),
                 custom_title: None,
                 root: PaneNodeSnapshot::Leaf(LeafSnapshot {
                     is_focused: true,
@@ -497,6 +499,7 @@ fn test_sqlite_round_trips_code_pane_with_multiple_tabs() {
     let app_state = AppState {
         windows: vec![WindowSnapshot {
             tabs: vec![TabSnapshot {
+                tags: Vec::new(),
                 custom_title: None,
                 root: PaneNodeSnapshot::Leaf(LeafSnapshot {
                     is_focused: true,
@@ -585,6 +588,7 @@ fn test_sqlite_round_trips_tab_groups() {
 
     let group_id = TabGroupId::new();
     let tab_in_group = TabSnapshot {
+        tags: Vec::new(),
         custom_title: None,
         root: PaneNodeSnapshot::Leaf(LeafSnapshot {
             is_focused: true,
@@ -615,6 +619,7 @@ fn test_sqlite_round_trips_tab_groups() {
         pinned: false,
     };
     let tab_outside_group = TabSnapshot {
+        tags: Vec::new(),
         custom_title: None,
         root: PaneNodeSnapshot::Leaf(LeafSnapshot {
             is_focused: false,
@@ -722,6 +727,7 @@ fn test_sqlite_round_trips_pinned_state() {
     let unpinned_group_id = TabGroupId::new();
 
     let pinned_tab = TabSnapshot {
+        tags: Vec::new(),
         custom_title: None,
         root: PaneNodeSnapshot::Leaf(LeafSnapshot {
             is_focused: true,
@@ -752,6 +758,7 @@ fn test_sqlite_round_trips_pinned_state() {
         pinned: true,
     };
     let unpinned_tab = TabSnapshot {
+        tags: Vec::new(),
         custom_title: None,
         root: PaneNodeSnapshot::Leaf(LeafSnapshot {
             is_focused: false,
@@ -782,6 +789,7 @@ fn test_sqlite_round_trips_pinned_state() {
         pinned: false,
     };
     let tab_in_pinned_group = TabSnapshot {
+        tags: Vec::new(),
         custom_title: None,
         root: PaneNodeSnapshot::Leaf(LeafSnapshot {
             is_focused: false,
@@ -1087,6 +1095,7 @@ fn marked_split(children: Vec<PaneNodeSnapshot>) -> PaneNodeSnapshot {
 
 fn marked_tab(root: PaneNodeSnapshot, pinned: bool, group_id: Option<TabGroupId>) -> TabSnapshot {
     TabSnapshot {
+        tags: Vec::new(),
         custom_title: None,
         root,
         default_directory_color: None,

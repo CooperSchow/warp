@@ -85,11 +85,11 @@ fn pane_name_actions_save_workspace_state() {
 fn tab_mark_actions_save_workspace_state() {
     let pane_group_id = EntityId::new();
     for action in [
-        WorkspaceAction::SetTabStarred {
+        WorkspaceAction::SetTabEmoji {
             pane_group_id,
-            starred: true,
+            emoji: "🔥".to_owned(),
+            present: true,
         },
-        WorkspaceAction::ToggleActiveTabStar,
         WorkspaceAction::SetTabUnread {
             pane_group_id,
             terminal_view_id: None,
@@ -104,4 +104,8 @@ fn tab_mark_actions_save_workspace_state() {
             "{action:?} should save workspace state"
         );
     }
+    // Opening the emoji picker changes nothing to save; each pick saves.
+    assert!(
+        !WorkspaceAction::ToggleTabEmojiPicker { pane_group_id }.should_save_app_state_on_action()
+    );
 }

@@ -760,6 +760,17 @@ define_settings_group!(TabSettings, settings: [
         description: "Automatically color tabs from the Claude conversation running in them, based on keyword rules. While enabled, directory-based tab colors are inactive.",
         feature_flag: warp_core::features::FeatureFlag::ClaudeAutoTabColors,
     },
+    float_tagged_tabs: FloatTaggedTabs {
+        type: bool,
+        default: true,
+        supported_platforms: SupportedPlatforms::ALL,
+        sync_to_cloud: SyncToCloud::Never,
+        surface: settings::SettingSurfaces::GUI,
+        private: false,
+        toml_path: "appearance.tabs.float_tagged_tabs",
+        description: "Keep tabs wearing emoji at the top of the tab list, where closing other tabs leaves them open.",
+        feature_flag: warp_core::features::FeatureFlag::StarredTabs,
+    },
 ]);
 
 #[cfg(test)]

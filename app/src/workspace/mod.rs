@@ -65,8 +65,7 @@ pub use registry::WorkspaceRegistry;
 pub use toast_stack::ToastStack;
 
 use crate::workspace::view::starred_tabs::{
-    active_tab_bulk_close_description, active_tab_star_description, starred_tabs_enabled,
-    PaletteBulkClose,
+    active_tab_bulk_close_description, starred_tabs_enabled, PaletteBulkClose,
 };
 use crate::workspace::view::tab_unread::active_tab_is_unread;
 use crate::workspace::view::{
@@ -75,11 +74,10 @@ use crate::workspace::view::{
     LEFT_PANEL_WARP_DRIVE_BINDING_NAME, NEW_AGENT_TAB_BINDING_NAME,
     NEW_AMBIENT_AGENT_TAB_BINDING_NAME, NEW_FILE_BINDING_NAME, NEW_TAB_BINDING_NAME,
     NEW_TERMINAL_TAB_BINDING_NAME, OPEN_GLOBAL_SEARCH_BINDING_NAME,
-    TOGGLE_ACTIVE_TAB_STAR_BINDING_NAME, TOGGLE_ACTIVE_TAB_UNREAD_BINDING_NAME,
-    TOGGLE_CONVERSATION_LIST_VIEW_BINDING_NAME, TOGGLE_NOTIFICATION_MAILBOX_BINDING_NAME,
-    TOGGLE_PROJECT_EXPLORER_BINDING_NAME, TOGGLE_RIGHT_PANEL_BINDING_NAME,
-    TOGGLE_TAB_CONFIGS_MENU_BINDING_NAME, TOGGLE_VERTICAL_TABS_PANEL_BINDING_NAME,
-    TOGGLE_WARP_DRIVE_BINDING_NAME,
+    TOGGLE_ACTIVE_TAB_UNREAD_BINDING_NAME, TOGGLE_CONVERSATION_LIST_VIEW_BINDING_NAME,
+    TOGGLE_NOTIFICATION_MAILBOX_BINDING_NAME, TOGGLE_PROJECT_EXPLORER_BINDING_NAME,
+    TOGGLE_RIGHT_PANEL_BINDING_NAME, TOGGLE_TAB_CONFIGS_MENU_BINDING_NAME,
+    TOGGLE_VERTICAL_TABS_PANEL_BINDING_NAME, TOGGLE_WARP_DRIVE_BINDING_NAME,
 };
 
 pub fn init(app: &mut AppContext) {
@@ -1106,10 +1104,10 @@ pub fn init(app: &mut AppContext) {
         ),
     ]);
 
-    // Tab marks (Eqho fork): Mark as Unread, Star, and a jump to the next
-    // unread tab. macOS defaults only: ⌃⌘ has no counterpart elsewhere, and
-    // Ctrl-J is a newline in a terminal. The toggles' palette labels follow
-    // the active tab.
+    // Tab marks (Eqho fork): Mark as Unread and a jump to the next unread tab.
+    // macOS defaults only: ⌃⌘ has no counterpart elsewhere, and Ctrl-J is a
+    // newline in a terminal. The toggle's palette label follows the active
+    // tab. Emoji tags have no key: the picker is a pointer's job.
     app.register_editable_bindings([
         EditableBinding::new(
             TOGGLE_ACTIVE_TAB_UNREAD_BINDING_NAME,
@@ -1122,16 +1120,6 @@ pub fn init(app: &mut AppContext) {
         .with_group(bindings::BindingGroup::Navigation.as_str())
         .with_context_predicate(id!("Workspace") & !id!("Workspace_PaneDragging"))
         .with_mac_key_binding("cmd-ctrl-u"),
-        EditableBinding::new(
-            TOGGLE_ACTIVE_TAB_STAR_BINDING_NAME,
-            BindingDescription::new("Star current tab")
-                .with_dynamic_override(active_tab_star_description),
-            WorkspaceAction::ToggleActiveTabStar,
-        )
-        .with_enabled(starred_tabs_enabled)
-        .with_group(bindings::BindingGroup::Navigation.as_str())
-        .with_context_predicate(id!("Workspace") & !id!("Workspace_PaneDragging"))
-        .with_mac_key_binding("cmd-ctrl-s"),
         EditableBinding::new(
             JUMP_TO_NEXT_UNREAD_TAB_BINDING_NAME,
             "Jump to next unread tab",
@@ -1190,8 +1178,8 @@ pub fn init(app: &mut AppContext) {
         EditableBinding::new(
             "workspace:close_tabs_right_active_tab",
             BindingDescription::new("Close tabs to the right").with_dynamic_override(|ctx| {
-                // Upstream's vertical wording, plus "(keep starred)" when the
-                // close would spare a starred tab.
+                // Upstream's vertical wording, plus "(keep tagged)" when the
+                // close would spare a floating tab.
                 let vertical = uses_vertical_tabs(ctx);
                 let label = if vertical {
                     "close tabs below"

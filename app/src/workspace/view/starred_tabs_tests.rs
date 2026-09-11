@@ -17,8 +17,7 @@ use warpui::{
 };
 
 use super::{
-    bulk_close_description, header_shows_star, row_star, shows_pin_overlay, star_description,
-    starred_divider_position, PaletteBulkClose, RowStar,
+    bulk_close_description, shows_pin_overlay, starred_divider_position, PaletteBulkClose,
 };
 use crate::appearance::Appearance;
 use crate::features::FeatureFlag;
@@ -30,13 +29,14 @@ use crate::undo_close::UndoCloseStack;
 use crate::workspace::tab_settings::{
     TabSettings, VerticalTabsDisplayGranularity, VerticalTabsTabItemMode, VerticalTabsViewMode,
 };
+use crate::workspace::view::tab_emoji_picker::TabEmojiPickerEvent;
+use crate::workspace::view::tab_tags::STAR;
 use crate::workspace::view::tests::{initialize_app, mock_workspace};
-use crate::workspace::view::vertical_tabs::vtab_group_position_id;
 use crate::workspace::view::VERTICAL_TABS_PANEL_POSITION_ID;
 use crate::workspace::{Workspace, WorkspaceAction};
 use crate::GlobalResourceHandles;
 
-/// Runs `check` under each combination of the two flags stars need, passing
+/// Runs `check` under each combination of the two flags tags need, passing
 /// `PinnedTabs` and `StarredTabs` in.
 fn for_each_flag_state(mut check: impl FnMut(bool, bool)) {
     for pins in [false, true] {
@@ -48,62 +48,10 @@ fn for_each_flag_state(mut check: impl FnMut(bool, bool)) {
     }
 }
 
-/// A starred tab wears one star wherever it's drawn: on its header in the Panes
-/// layout when the panel draws one, and otherwise on its first row. Its rows
-/// are indented alike, so their titles line up: all past the star's slot when
-/// its first row wears the star, and none when its header does. Unstarred
-/// tabs, and every tab with stars off, wear nothing. Over every flag state,
-/// starred or not, header drawn or not, and one to three rows.
-#[test]
-fn a_starred_tab_wears_one_star_and_its_rows_line_up() {
-    for_each_flag_state(|pins, stars| {
-        let stars_on = pins && stars;
-        for starred in [false, true] {
-            for header_drawn in [false, true] {
-                let context =
-                    format!("pins {pins}, stars {stars}, starred {starred}, header {header_drawn}");
-                let header_wears_star = header_shows_star(starred, header_drawn);
-                assert_eq!(
-                    header_wears_star,
-                    stars_on && starred && header_drawn,
-                    "{context}"
-                );
-                for row_count in 1..=3usize {
-                    let rows: Vec<RowStar> = (0..row_count)
-                        .map(|row| row_star(starred, row == 0, header_wears_star))
-                        .collect();
-                    let stars_worn = usize::from(header_wears_star)
-                        + rows.iter().filter(|row| **row == RowStar::Star).count();
-                    assert_eq!(
-                        stars_worn,
-                        usize::from(stars_on && starred),
-                        "{context}, {row_count} rows: {rows:?}"
-                    );
-                    assert!(
-                        rows.iter().skip(1).all(|row| *row != RowStar::Star),
-                        "{context}: only the first row can wear it: {rows:?}"
-                    );
-                    assert!(
-                        rows.iter()
-                            .all(|row| row.is_indented() == rows[0].is_indented()),
-                        "{context}: the rows line up: {rows:?}"
-                    );
-                    if header_wears_star || !(stars_on && starred) {
-                        assert!(
-                            rows.iter().all(|row| *row == RowStar::None),
-                            "{context}: no row wears or makes room for a star: {rows:?}"
-                        );
-                    }
-                }
-            }
-        }
-    });
-}
-
 /// With `StarredTabs` off the pin overlay follows upstream's rule exactly; with
 /// it on, the overlay never shows.
 #[test]
-fn stars_replace_the_pin_overlay_and_leave_it_as_it_was_when_off() {
+fn tags_replace_the_pin_overlay_and_leave_it_as_it_was_when_off() {
     for_each_flag_state(|pins, stars| {
         for pinned in [false, true] {
             for hidden_by_hover in [false, true] {
@@ -118,12 +66,13 @@ fn stars_replace_the_pin_overlay_and_leave_it_as_it_was_when_off() {
     });
 }
 
-/// Every set of shown tabs drawn from up to eight, with every length of starred
-/// block: the hairline goes before the first shown tab past the block, exactly
-/// when shown tabs sit on both sides of it, and so never with an empty block
-/// (stars off), every tab starred, or a search that hides either side.
+/// Every set of shown tabs drawn from up to eight, with every length of
+/// floating block: the hairline goes before the first shown tab past the
+/// block, exactly when shown tabs sit on both sides of it, and so never with
+/// an empty block (tags off), every tab floating, or a search that hides
+/// either side.
 #[test]
-fn the_hairline_sits_under_the_starred_block_only_when_both_sides_show() {
+fn the_hairline_sits_under_the_floating_block_only_when_both_sides_show() {
     let mut cases = 0;
     for tab_count in 0..=8usize {
         for shown_set in 0u32..(1 << tab_count) {
@@ -131,12 +80,12 @@ fn the_hairline_sits_under_the_starred_block_only_when_both_sides_show() {
                 .filter(|index| shown_set & (1 << index) != 0)
                 .collect();
             for boundary in 0..=tab_count {
-                let starred_show = shown.iter().any(|index| *index < boundary);
+                let floating_show = shown.iter().any(|index| *index < boundary);
                 let others_show = shown.iter().any(|index| *index >= boundary);
                 let position = starred_divider_position(shown.iter().copied(), boundary);
                 assert_eq!(
                     position.is_some(),
-                    starred_show && others_show,
+                    floating_show && others_show,
                     "shown {shown:?}, boundary {boundary}"
                 );
                 if let Some(position) = position {
@@ -144,7 +93,7 @@ fn the_hairline_sits_under_the_starred_block_only_when_both_sides_show() {
                         shown[..position].iter().all(|index| *index < boundary)
                             && shown[position..].iter().all(|index| *index >= boundary),
                         "shown {shown:?}, boundary {boundary}: the line at {position} must \
-                         split the starred rows from the rest"
+                         split the floating rows from the rest"
                     );
                 }
                 cases += 1;
@@ -155,44 +104,50 @@ fn the_hairline_sits_under_the_starred_block_only_when_both_sides_show() {
 }
 
 /// The icon renderer tints a bundled icon with its ink and takes the icon's red
-/// channel as that ink's opacity, so the star must be drawn in white to paint
-/// at full strength. Filled with #121212, it painted at about 7% of the
-/// title's ink and all but vanished.
+/// channel as that ink's opacity, so the fork's icons must paint in white to
+/// show at full strength. The star, filled with #121212, once painted at about
+/// 7% of its ink and all but vanished.
 #[test]
-fn the_star_is_drawn_in_white_so_it_paints_in_its_full_ink() {
+fn the_forks_icons_paint_in_white_so_they_show_in_their_full_ink() {
     use warpui::assets::AssetProvider as _;
 
-    let svg = crate::ASSETS
-        .get("bundled/svg/star-filled.svg")
-        .expect("the star is bundled");
-    let svg = std::str::from_utf8(&svg).expect("the star is text");
-    let paint_values = |attribute: &str| -> Vec<String> {
-        svg.match_indices(attribute)
-            .map(|(start, _)| {
-                let value = &svg[start + attribute.len()..];
-                value[..value.find('"').expect("a closing quote")].to_ascii_lowercase()
-            })
-            .collect()
-    };
+    for path in [
+        "bundled/svg/star-filled.svg",
+        "bundled/svg/face-smile-plus.svg",
+    ] {
+        let svg = crate::ASSETS
+            .get(path)
+            .expect("the fork's icons are bundled");
+        let svg = std::str::from_utf8(&svg).expect("an icon is text");
+        let paint_values = |attribute: &str| -> Vec<String> {
+            svg.match_indices(attribute)
+                .map(|(start, _)| {
+                    let value = &svg[start + attribute.len()..];
+                    value[..value.find('"').expect("a closing quote")].to_ascii_lowercase()
+                })
+                .collect()
+        };
 
-    // The root's `fill="none"` only says the canvas has no fill of its own.
-    let shape_fills: Vec<String> = paint_values(" fill=\"")
-        .into_iter()
-        .filter(|fill| fill != "none")
-        .collect();
-    assert!(!shape_fills.is_empty(), "the star's shape is filled");
-    for fill in &shape_fills {
-        assert!(
-            matches!(fill.as_str(), "white" | "#fff" | "#ffffff"),
-            "the star must be filled white, not {fill}"
-        );
-    }
-    for attribute in [" stroke=\"", " opacity=\"", " fill-opacity=\""] {
-        assert_eq!(
-            paint_values(attribute),
-            Vec::<String>::new(),
-            "a{attribute}..\" would dim the star"
-        );
+        // The root's `fill="none"` only says the canvas has no fill of its own.
+        let paints: Vec<String> = paint_values(" fill=\"")
+            .into_iter()
+            .chain(paint_values(" stroke=\""))
+            .filter(|paint| paint != "none")
+            .collect();
+        assert!(!paints.is_empty(), "{path} paints something");
+        for paint in &paints {
+            assert!(
+                matches!(paint.as_str(), "white" | "#fff" | "#ffffff"),
+                "{path} must paint white, not {paint}"
+            );
+        }
+        for attribute in [" opacity=\"", " fill-opacity=\"", " stroke-opacity=\""] {
+            assert_eq!(
+                paint_values(attribute),
+                Vec::<String>::new(),
+                "{path}: a{attribute}..\" would dim it"
+            );
+        }
     }
 }
 
@@ -228,7 +183,7 @@ impl Layout {
     }
 }
 
-/// Every layout whose rows the star leads: the vertical panel's compact rows,
+/// Every layout a tab's emoji lead: the vertical panel's compact rows,
 /// expanded rows and Summary cards, each pane's row, and the horizontal tab
 /// bar.
 const LAYOUTS: [Layout; 6] = [
@@ -289,6 +244,12 @@ fn use_layout(app: &mut App, workspace: &ViewHandle<Workspace>, layout: Layout) 
     });
 }
 
+fn set_float_tagged_tabs(app: &mut App, float: bool) {
+    TabSettings::handle(app).update(app, |settings, ctx| {
+        report_if_error!(settings.float_tagged_tabs.set_value(float, ctx));
+    });
+}
+
 /// The bitmap the image cache holds for the bundled `path` at `size` points: the
 /// very `Arc` that every icon painted from that file at that size shares, so an
 /// icon in a scene can be told apart from any other of the same size and ink.
@@ -311,63 +272,30 @@ fn cached_icon(path: &'static str, size: i32, ctx: &AppContext) -> Arc<StaticIma
     image.clone()
 }
 
-/// What one paint of a workspace's window drew for the tab marks.
+/// What one paint of a workspace's window drew around the floating block.
+/// Where the emoji themselves land is the screenshot test's to check.
 #[derive(Debug, PartialEq)]
 struct PaintedMarks {
-    /// Per tab, the stars painted inside its row at a row title's size.
-    stars: Vec<usize>,
-    /// Per tab, the stars painted inside its block at a Panes header's size.
-    header_stars: Vec<usize>,
     /// Per tab, upstream's pins painted inside its row.
     pins: Vec<usize>,
     /// Per hairline painted in the vertical tabs panel, the index of the first
     /// tab whose row lies wholly below it.
     hairlines: Vec<usize>,
-    /// How many lines the vertical tabs panel draws where the starred block
-    /// ends, between the last starred tab's row and the first other one: the
+    /// How many lines the vertical tabs panel draws where the floating block
+    /// ends, between the last floating tab's row and the first other one: the
     /// hairline, and any border along either row's facing edge. `None` when
     /// the panel isn't showing or the block doesn't end between two tabs.
     lines_closing_the_block: Option<usize>,
-    /// Per tab group, in `groups` order, the stars painted inside its block.
-    group_stars: Vec<usize>,
-}
-
-/// The bitmap the image cache holds for the bundled `path` at `size` points,
-/// once something has painted it; `None` if nothing has.
-fn painted_icon(path: &'static str, size: i32, ctx: &AppContext) -> Option<Arc<StaticImage>> {
-    let state = ImageCache::as_ref(ctx).image(
-        AssetSource::Bundled { path },
-        vec2i(size, size),
-        FitType::Contain,
-        AnimatedImageBehavior::FullAnimation,
-        CacheOption::BySize,
-        None,
-        AssetCache::as_ref(ctx),
-    );
-    let AssetState::Loaded { data } = state else {
-        return None;
-    };
-    match data.as_ref() {
-        Image::Static(image) => Some(image.clone()),
-        _ => None,
-    }
 }
 
 /// Paints the workspace's whole window, every view in it, and reads back where
-/// the stars, pins and hairlines landed.
+/// the pins and hairlines landed.
 fn paint_marks(app: &mut App, workspace: &ViewHandle<Workspace>) -> PaintedMarks {
-    let (window_id, tab_count, starred_boundary, groups) = workspace.read(app, |workspace, _| {
-        let mut groups: Vec<_> = workspace
-            .tabs
-            .iter()
-            .filter_map(|tab| tab.group_id)
-            .collect();
-        groups.dedup();
+    let (window_id, tab_count, starred_boundary) = workspace.read(app, |workspace, _| {
         (
             workspace.window_id,
             workspace.tabs.len(),
             workspace.starred_boundary(),
-            groups,
         )
     });
     app.update(|ctx| {
@@ -384,7 +312,6 @@ fn paint_marks(app: &mut App, workspace: &ViewHandle<Workspace>) -> PaintedMarks
             scene = Some(presenter.build_scene(vec2f(1280., 800.), 1., None, ctx));
         }
         let scene = scene.expect("the window was painted");
-        let star = cached_icon("bundled/svg/star-filled.svg", 10, ctx);
         let pin = cached_icon("bundled/svg/pin-filled-diagonal.svg", 16, ctx);
         let positions = presenter.position_cache();
         let rows: Vec<RectF> = (0..tab_count)
@@ -401,11 +328,6 @@ fn paint_marks(app: &mut App, workspace: &ViewHandle<Workspace>) -> PaintedMarks
                 .filter(|icon| Arc::ptr_eq(&icon.asset, image) && bounds.contains_rect(icon.bounds))
                 .count()
         };
-        let header_star = painted_icon(
-            "bundled/svg/star-filled.svg",
-            super::HEADER_STAR_SIZE as i32,
-            ctx,
-        );
         let theme = Appearance::as_ref(ctx).theme();
         let hairline_inks = [
             internal_colors::fg_overlay_1(theme).into_solid(),
@@ -460,33 +382,16 @@ fn paint_marks(app: &mut App, workspace: &ViewHandle<Workspace>) -> PaintedMarks
                     .sum()
             });
         PaintedMarks {
-            stars: rows.iter().map(|row| icons_inside(&star, *row)).collect(),
-            header_stars: rows
-                .iter()
-                .map(|row| {
-                    header_star
-                        .as_ref()
-                        .map_or(0, |image| icons_inside(image, *row))
-                })
-                .collect(),
             pins: rows.iter().map(|row| icons_inside(&pin, *row)).collect(),
             hairlines,
             lines_closing_the_block,
-            group_stars: groups
-                .iter()
-                .map(|group_id| {
-                    positions
-                        .get_position(vtab_group_position_id(*group_id))
-                        .map_or(0, |block| icons_inside(&star, block))
-                })
-                .collect(),
         }
     })
 }
 
 /// Four terminal tabs, the third split in two, then the third and fourth
-/// starred, which moves them to the top: the split tab first, then the other.
-fn workspace_with_two_starred_tabs(app: &mut App) -> ViewHandle<Workspace> {
+/// floated, which moves them to the top: the split tab first, then the other.
+fn workspace_with_two_floating_tabs(app: &mut App) -> ViewHandle<Workspace> {
     let workspace = mock_workspace(app);
     workspace.update(app, |workspace, ctx| {
         while workspace.tab_count() < 4 {
@@ -508,18 +413,17 @@ fn workspace_with_two_starred_tabs(app: &mut App) -> ViewHandle<Workspace> {
                 .visible_pane_ids()
                 .len(),
             2,
-            "the first starred tab is the split one"
+            "the first floating tab is the split one"
         );
     });
     workspace
 }
 
-/// With stars on, every layout paints one star on each starred tab, a split tab
-/// included, and none elsewhere; upstream's pin nowhere; and in the vertical
-/// panel one hairline, between the starred tabs and the rest. Starring every
-/// tab takes the line away, and a starred group wears one star, on its header.
+/// With tags on, no layout paints upstream's pin, and the vertical panel
+/// paints one hairline, between the floating tabs and the rest, a split tab's
+/// rows included. Floating every tab takes the line away.
 #[test]
-fn stars_and_the_hairline_paint_where_they_belong() {
+fn the_hairline_paints_under_the_floating_tabs_and_no_pin_shows() {
     let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
     let _stars = FeatureFlag::StarredTabs.override_enabled(true);
     let _vertical_tabs = FeatureFlag::VerticalTabs.override_enabled(true);
@@ -528,33 +432,22 @@ fn stars_and_the_hairline_paint_where_they_belong() {
 
     App::test(crate::ASSETS, |mut app| async move {
         initialize_app(&mut app);
-        let workspace = workspace_with_two_starred_tabs(&mut app);
+        let workspace = workspace_with_two_floating_tabs(&mut app);
         for layout in LAYOUTS {
             use_layout(&mut app, &workspace, layout);
-            // In the Panes layout the split tab's header, its own label, wears
-            // its star; the other starred tab, one pane with no header, wears
-            // it on its row.
-            let (stars, header_stars) = if layout.rows_per_pane() {
-                (vec![0, 1, 0, 0], vec![1, 0, 0, 0])
-            } else {
-                (vec![1, 1, 0, 0], vec![0; 4])
-            };
             assert_eq!(
                 paint_marks(&mut app, &workspace),
                 PaintedMarks {
-                    stars,
-                    header_stars,
                     pins: vec![0; 4],
                     hairlines: if layout.vertical { vec![2] } else { vec![] },
                     lines_closing_the_block: layout.vertical.then_some(1),
-                    group_stars: vec![],
                 },
                 "{}",
                 layout.name
             );
         }
 
-        // Every tab starred: there's nothing to divide.
+        // Every tab floating: there's nothing to divide.
         workspace.update(&mut app, |workspace, ctx| {
             workspace.pin_tab(2, ctx);
             workspace.pin_tab(3, ctx);
@@ -562,53 +455,17 @@ fn stars_and_the_hairline_paint_where_they_belong() {
         for layout in LAYOUTS {
             use_layout(&mut app, &workspace, layout);
             let painted = paint_marks(&mut app, &workspace);
-            let worn: Vec<usize> = painted
-                .stars
-                .iter()
-                .zip(&painted.header_stars)
-                .map(|(on_rows, on_header)| on_rows + on_header)
-                .collect();
-            assert_eq!(worn, vec![1; 4], "{}: {painted:?}", layout.name);
             assert_eq!(painted.hairlines, Vec::<usize>::new(), "{}", layout.name);
+            assert_eq!(painted.pins, vec![0; 4], "{}", layout.name);
         }
-
-        // The last two tabs unstarred and grouped, and the group starred: its
-        // header wears the star, and its members wear none of their own.
-        workspace.update(&mut app, |workspace, ctx| {
-            workspace.unpin_tab(3, ctx);
-            workspace.unpin_tab(2, ctx);
-            workspace.handle_action(&WorkspaceAction::NewTabGroupFromTab(2), ctx);
-            let group_id = workspace.tabs[2].group_id.expect("tab 2 is grouped");
-            workspace.handle_action(
-                &WorkspaceAction::MoveTabToGroup {
-                    tab_index: 3,
-                    group_id,
-                },
-                ctx,
-            );
-            workspace.handle_action(&WorkspaceAction::PinTabGroup(group_id), ctx);
-            assert!(workspace.tab_groups[&group_id].pinned);
-        });
-        use_layout(&mut app, &workspace, LAYOUTS[0]);
-        let painted = paint_marks(&mut app, &workspace);
-        assert_eq!(
-            painted.group_stars,
-            vec![1],
-            "one star, on the group's header"
-        );
-        assert_eq!(
-            painted.stars.iter().sum::<usize>(),
-            2,
-            "the two starred tabs wear one star each, the group's members none: {painted:?}"
-        );
     });
 }
 
 /// With `StarredTabs` off, pinned tabs paint as upstream paints them: its pin on
 /// each pinned row (each of a split tab's rows, in the per-pane layouts) or in
-/// the horizontal tab's close slot, with no star and no hairline anywhere.
+/// the horizontal tab's close slot, with no hairline anywhere.
 #[test]
-fn with_stars_off_pinned_tabs_paint_as_upstream_does() {
+fn with_tags_off_pinned_tabs_paint_as_upstream_does() {
     let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
     let _stars = FeatureFlag::StarredTabs.override_enabled(false);
     let _vertical_tabs = FeatureFlag::VerticalTabs.override_enabled(true);
@@ -617,19 +474,16 @@ fn with_stars_off_pinned_tabs_paint_as_upstream_does() {
 
     App::test(crate::ASSETS, |mut app| async move {
         initialize_app(&mut app);
-        let workspace = workspace_with_two_starred_tabs(&mut app);
+        let workspace = workspace_with_two_floating_tabs(&mut app);
         for layout in LAYOUTS {
             use_layout(&mut app, &workspace, layout);
             let split_tab_pins = if layout.rows_per_pane() { 2 } else { 1 };
             assert_eq!(
                 paint_marks(&mut app, &workspace),
                 PaintedMarks {
-                    stars: vec![0; 4],
-                    header_stars: vec![0; 4],
                     pins: vec![split_tab_pins, 1, 0, 0],
                     hairlines: vec![],
                     lines_closing_the_block: None,
-                    group_stars: vec![],
                 },
                 "{}",
                 layout.name
@@ -647,6 +501,11 @@ fn tab_ids(workspace: &Workspace) -> Vec<EntityId> {
         .collect()
 }
 
+/// The tabs' emoji, in list order.
+fn tab_tags(workspace: &Workspace) -> Vec<Vec<String>> {
+    workspace.tabs.iter().map(|tab| tab.tags.to_vec()).collect()
+}
+
 fn workspace_with_tabs(app: &mut App, count: usize) -> ViewHandle<Workspace> {
     let workspace = mock_workspace(app);
     workspace.update(app, |workspace, ctx| {
@@ -655,6 +514,14 @@ fn workspace_with_tabs(app: &mut App, count: usize) -> ViewHandle<Workspace> {
         }
     });
     workspace
+}
+
+fn emoji(pane_group_id: EntityId, emoji: &str, present: bool) -> WorkspaceAction {
+    WorkspaceAction::SetTabEmoji {
+        pane_group_id,
+        emoji: emoji.to_owned(),
+        present,
+    }
 }
 
 /// Moves the tab at `index` from `source` into `target`'s window, dropped on
@@ -690,42 +557,57 @@ fn move_tab_to_other_window(
     (pane_group_id, landed)
 }
 
-/// A starred tab moved to another window keeps its star and lands at the end
-/// of that window's starred block, whatever slot it's dropped on; an unstarred
-/// one lands on its slot. With stars off, upstream's result: the pin stays
-/// behind, and every tab lands on its slot, pushed past the pinned block.
+/// A tagged tab moved to another window keeps its emoji and keeps floating,
+/// landing at the end of that window's floating block whatever slot it's
+/// dropped on; an untagged one lands on its slot. With tags off, upstream's
+/// result: the pin stays behind, and every tab lands on its slot, pushed past
+/// the pinned block.
 #[test]
-fn a_starred_tab_moved_to_another_window_keeps_its_star() {
-    for stars in [true, false] {
+fn a_tagged_tab_moved_to_another_window_keeps_its_emoji() {
+    for tags in [true, false] {
         let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
-        let _stars = FeatureFlag::StarredTabs.override_enabled(stars);
+        let _stars = FeatureFlag::StarredTabs.override_enabled(tags);
         App::test((), |mut app| async move {
             initialize_app(&mut app);
-            // The source leads with two starred tabs, the target with one.
+            // The source leads with two floating tabs wearing 🔥, the target
+            // with one.
             let source = workspace_with_tabs(&mut app, 4);
             let target = workspace_with_tabs(&mut app, 3);
             source.update(&mut app, |workspace, ctx| {
-                workspace.pin_tab(0, ctx);
-                workspace.pin_tab(1, ctx);
+                if tags {
+                    // Tagging floats each, in order.
+                    for id in tab_ids(workspace)[..2].to_vec() {
+                        workspace.handle_action(&emoji(id, "🔥", true), ctx);
+                    }
+                } else {
+                    workspace.pin_tab(0, ctx);
+                    workspace.pin_tab(1, ctx);
+                }
             });
             target.update(&mut app, |workspace, ctx| workspace.pin_tab(0, ctx));
 
-            // Each move takes the source's first tab: (starred, drop slot,
-            // where it lands and how long the target's starred block is then,
-            // with stars on and with them off).
-            for (starred, slot, with_stars, without_stars) in [
+            // Each move takes the source's first tab: (tagged, drop slot,
+            // where it lands and how long the target's floating block is then,
+            // with tags on and with them off).
+            for (tagged, slot, with_tags, without_tags) in [
                 (true, 3, (1, 2), (3, 1)),
                 (true, 0, (2, 3), (1, 1)),
                 (false, 5, (5, 3), (5, 1)),
             ] {
-                let case = format!("stars {stars}, starred {starred}, slot {slot}");
-                let (expected_landing, block) = if stars { with_stars } else { without_stars };
+                let case = format!("tags {tags}, tagged {tagged}, slot {slot}");
+                let (expected_landing, block) = if tags { with_tags } else { without_tags };
                 let (moved, landed) = move_tab_to_other_window(&mut app, &source, 0, &target, slot);
                 target.read(&app, |workspace, _| {
                     assert_eq!(landed, expected_landing, "{case}");
                     assert_eq!(workspace.tabs[landed].pane_group.id(), moved, "{case}");
                     assert_eq!(workspace.active_tab_index, landed, "{case}");
-                    assert_eq!(workspace.tabs[landed].pinned, stars && starred, "{case}");
+                    assert_eq!(workspace.tabs[landed].pinned, tags && tagged, "{case}");
+                    let worn: Vec<String> = if tags && tagged {
+                        vec!["🔥".to_owned()]
+                    } else {
+                        vec![]
+                    };
+                    assert_eq!(workspace.tabs[landed].tags.to_vec(), worn, "{case}");
                     assert_eq!(
                         workspace.pinned_boundary_index(&workspace.tabs),
                         block,
@@ -733,7 +615,7 @@ fn a_starred_tab_moved_to_another_window_keeps_its_star() {
                     );
                     assert!(
                         workspace.tabs[block..].iter().all(|tab| !tab.pinned),
-                        "{case}: the starred tabs stay one block at the top"
+                        "{case}: the floating tabs stay one block at the top"
                     );
                 });
             }
@@ -741,24 +623,38 @@ fn a_starred_tab_moved_to_another_window_keeps_its_star() {
     }
 }
 
-/// Moved into a window of its own, a starred tab keeps its star with stars on,
-/// and arrives unpinned with them off, as upstream's does.
+/// Moved into a window of its own, a tagged tab keeps its emoji and its float
+/// with tags on, and arrives plain and unpinned with them off, as upstream's
+/// does.
 #[test]
-fn a_starred_tab_moved_to_a_new_window_keeps_its_star() {
-    for stars in [true, false] {
+fn a_tagged_tab_moved_to_a_new_window_keeps_its_emoji() {
+    for tags in [true, false] {
         let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
-        let _stars = FeatureFlag::StarredTabs.override_enabled(stars);
+        let _stars = FeatureFlag::StarredTabs.override_enabled(tags);
         App::test((), |mut app| async move {
             initialize_app(&mut app);
             let source = workspace_with_tabs(&mut app, 2);
-            source.update(&mut app, |workspace, ctx| workspace.pin_tab(1, ctx));
-            for (index, starred) in [(0, true), (1, false)] {
+            source.update(&mut app, |workspace, ctx| {
+                workspace.pin_tab(1, ctx);
+                let id = workspace.tabs[0].pane_group.id();
+                workspace.handle_action(&emoji(id, "🧪", true), ctx);
+            });
+            for (index, tagged) in [(0, true), (1, false)] {
                 let transferred = source
                     .read(&app, |workspace, ctx| {
                         workspace.get_tab_transfer_info(index, ctx)
                     })
                     .expect("the source has two tabs");
-                assert_eq!(transferred.pinned, starred, "the snapshot carries the star");
+                assert_eq!(transferred.pinned, tagged, "the snapshot carries the float");
+                assert_eq!(
+                    transferred.tags,
+                    if tags && tagged {
+                        vec!["🧪".to_owned()]
+                    } else {
+                        vec![]
+                    },
+                    "the snapshot carries the emoji"
+                );
 
                 let global_resource_handles = GlobalResourceHandles::mock(&mut app);
                 let (_, window) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
@@ -774,32 +670,24 @@ fn a_starred_tab_moved_to_a_new_window_keeps_its_star() {
                             is_right_panel_maximized: false,
                             is_tab_drag_preview: false,
                             pinned: transferred.pinned,
+                            tags: transferred.tags.clone(),
                         },
                         ctx,
                     )
                 });
                 window.read(&app, |workspace, _| {
                     assert_eq!(workspace.tabs.len(), 1);
-                    assert_eq!(
-                        workspace.tabs[0].pinned,
-                        stars && starred,
-                        "stars {stars}, starred {starred}"
-                    );
+                    let case = format!("tags {tags}, tagged {tagged}");
+                    assert_eq!(workspace.tabs[0].pinned, tags && tagged, "{case}");
+                    assert_eq!(workspace.tabs[0].tags.to_vec(), transferred.tags, "{case}");
                 });
             }
         });
     }
 }
 
-fn star(pane_group_id: EntityId, starred: bool) -> WorkspaceAction {
-    WorkspaceAction::SetTabStarred {
-        pane_group_id,
-        starred,
-    }
-}
-
-/// The action behind the star item of the menu for the tab at `index`.
-fn star_item_action(workspace: &Workspace, index: usize, ctx: &AppContext) -> WorkspaceAction {
+/// The action behind the emoji item of the menu for the tab at `index`.
+fn emoji_item_action(workspace: &Workspace, index: usize, ctx: &AppContext) -> WorkspaceAction {
     let items = workspace.tabs[index].menu_items(
         index,
         workspace.tabs.len(),
@@ -814,19 +702,20 @@ fn star_item_action(workspace: &Workspace, index: usize, ctx: &AppContext) -> Wo
     items
         .iter()
         .find_map(|item| match item {
-            MenuItem::Item(fields) if fields.label().contains("tar tab") => {
+            MenuItem::Item(fields) if fields.label().ends_with("emoji…") => {
                 fields.on_select_action().cloned()
             }
             _ => None,
         })
-        .expect("the tab menu has a star item")
+        .expect("the tab menu has an emoji item")
 }
 
-/// A star acts on the tab its action names, wherever that tab has moved since
-/// the menu opened. Asking for the state a tab already has, or naming a tab that
-/// has since closed, changes nothing.
+/// An emoji acts on the tab its action names, wherever that tab has moved,
+/// and so does the menu's picker; asking for what a tab already wears, or
+/// naming a tab that has since closed, changes nothing. A tab floats as its
+/// first emoji goes on and sinks just past the block as its last comes off.
 #[test]
-fn a_star_follows_its_tab_and_repeating_it_changes_nothing() {
+fn an_emoji_follows_its_tab_and_repeating_it_changes_nothing() {
     let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
     let _stars = FeatureFlag::StarredTabs.override_enabled(true);
 
@@ -836,39 +725,63 @@ fn a_star_follows_its_tab_and_repeating_it_changes_nothing() {
         workspace.update(&mut app, |workspace, ctx| {
             let [a, b, c, d] = <[EntityId; 4]>::try_from(tab_ids(workspace)).unwrap();
 
-            workspace.handle_action(&star(c, true), ctx);
+            workspace.handle_action(&emoji(c, "🔥", true), ctx);
             assert_eq!(tab_ids(workspace), [c, a, b, d]);
             assert!(workspace.tabs[0].pinned);
+            assert_eq!(workspace.tabs[0].tags.to_vec(), ["🔥"]);
 
-            // Again, and an unstar of a tab that isn't starred: no change.
-            workspace.handle_action(&star(c, true), ctx);
-            workspace.handle_action(&star(d, false), ctx);
+            // Again, and taking off an emoji a tab doesn't wear: no change.
+            workspace.handle_action(&emoji(c, "🔥", true), ctx);
+            workspace.handle_action(&emoji(d, "🔥", false), ctx);
             assert_eq!(tab_ids(workspace), [c, a, b, d]);
             assert_eq!(workspace.starred_boundary(), 1);
 
             // A menu opened on d, then d moved up before the click: the click
-            // still stars d.
-            let click = star_item_action(workspace, 3, ctx);
+            // opens the picker for d, and a pick there tags d.
+            let click = emoji_item_action(workspace, 3, ctx);
             workspace.handle_action(&WorkspaceAction::MoveTabLeft(3), ctx);
             assert_eq!(tab_ids(workspace), [c, a, d, b]);
             workspace.handle_action(&click, ctx);
+            assert_eq!(
+                workspace
+                    .tab_emoji_picker_target
+                    .map(|target| target.pane_group_id),
+                Some(d)
+            );
+            workspace.handle_tab_emoji_picker_event(
+                &TabEmojiPickerEvent::SetTag {
+                    emoji: "✅",
+                    present: true,
+                },
+                ctx,
+            );
             assert_eq!(tab_ids(workspace), [c, d, a, b]);
             assert_eq!(workspace.starred_boundary(), 2);
+            // The picker stays open for the next pick, until it's closed.
+            assert!(workspace.tab_emoji_picker_target.is_some());
+            workspace.handle_tab_emoji_picker_event(&TabEmojiPickerEvent::Closed, ctx);
+            assert!(workspace.tab_emoji_picker_target.is_none());
+
+            // c's last emoji comes off: it sinks to just past the block.
+            workspace.handle_action(&emoji(c, "🔥", false), ctx);
+            assert_eq!(tab_ids(workspace), [d, c, a, b]);
+            assert_eq!(workspace.starred_boundary(), 1);
+            assert!(workspace.tabs[1].tags.to_vec().is_empty());
 
             // A tab that has since closed.
             workspace.handle_action(&WorkspaceAction::CloseTab(3), ctx);
-            assert_eq!(tab_ids(workspace), [c, d, a]);
-            workspace.handle_action(&star(b, true), ctx);
-            assert_eq!(tab_ids(workspace), [c, d, a]);
-            assert_eq!(workspace.starred_boundary(), 2);
+            assert_eq!(tab_ids(workspace), [d, c, a]);
+            workspace.handle_action(&emoji(b, "🔥", true), ctx);
+            assert_eq!(tab_ids(workspace), [d, c, a]);
+            assert_eq!(workspace.starred_boundary(), 1);
         });
     });
 }
 
-/// Ctrl-Cmd-S stars the active tab, which stays active as it moves to the top,
-/// and pressing it again unstars it, still active.
+/// The active tab stays active as its first emoji floats it to the top and its
+/// last sinks it again.
 #[test]
-fn the_star_key_keeps_the_active_tab_active() {
+fn a_tagged_active_tab_stays_active_as_it_floats_and_sinks() {
     let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
     let _stars = FeatureFlag::StarredTabs.override_enabled(true);
 
@@ -879,12 +792,12 @@ fn the_star_key_keeps_the_active_tab_active() {
             workspace.handle_action(&WorkspaceAction::ActivateTab(2), ctx);
             let active = workspace.tabs[2].pane_group.id();
 
-            workspace.handle_action(&WorkspaceAction::ToggleActiveTabStar, ctx);
+            workspace.handle_action(&emoji(active, "🔥", true), ctx);
             assert_eq!(workspace.tabs[0].pane_group.id(), active);
             assert!(workspace.tabs[0].pinned);
             assert_eq!(workspace.active_tab_index, 0);
 
-            workspace.handle_action(&WorkspaceAction::ToggleActiveTabStar, ctx);
+            workspace.handle_action(&emoji(active, "🔥", false), ctx);
             assert!(workspace.tabs.iter().all(|tab| !tab.pinned));
             assert_eq!(
                 workspace.tabs[workspace.active_tab_index].pane_group.id(),
@@ -894,9 +807,9 @@ fn the_star_key_keeps_the_active_tab_active() {
     });
 }
 
-/// With pins on but stars off, the star actions do nothing.
+/// With pins on but tags off, the emoji action and the picker do nothing.
 #[test]
-fn the_star_actions_do_nothing_with_stars_off() {
+fn the_emoji_actions_do_nothing_with_tags_off() {
     let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
     let _stars = FeatureFlag::StarredTabs.override_enabled(false);
 
@@ -905,22 +818,113 @@ fn the_star_actions_do_nothing_with_stars_off() {
         let workspace = workspace_with_tabs(&mut app, 3);
         workspace.update(&mut app, |workspace, ctx| {
             let before = tab_ids(workspace);
-            workspace.handle_action(&star(before[2], true), ctx);
-            workspace.handle_action(&WorkspaceAction::ToggleActiveTabStar, ctx);
+            workspace.handle_action(&emoji(before[2], "🔥", true), ctx);
+            workspace.handle_action(
+                &WorkspaceAction::ToggleTabEmojiPicker {
+                    pane_group_id: before[2],
+                },
+                ctx,
+            );
             assert_eq!(tab_ids(workspace), before);
-            assert!(workspace.tabs.iter().all(|tab| !tab.pinned));
+            assert!(workspace
+                .tabs
+                .iter()
+                .all(|tab| !tab.pinned && tab.tags.is_empty()));
+            assert!(workspace.tab_emoji_picker_target.is_none());
         });
     });
 }
 
-/// The palette's words for Ctrl-Cmd-S follow the active tab as the menu's do,
-/// and its bulk closes say "(keep starred)" exactly when they would spare a
-/// starred tab.
+/// With "Float tagged tabs to the top" off, emoji are labels: tabs keep their
+/// places as emoji go on and off. Turning it on floats every tagged tab at
+/// once, in list order; turning it off settles every floating tab where it
+/// is, still wearing its emoji, and a tab that floated with none of its own,
+/// as an old star does, keeps a ⭐.
 #[test]
-fn the_palette_says_what_the_star_and_bulk_close_keys_will_do() {
+fn the_float_setting_decides_whether_tagged_tabs_float() {
+    let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
+    let _stars = FeatureFlag::StarredTabs.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = workspace_with_tabs(&mut app, 4);
+        set_float_tagged_tabs(&mut app, false);
+        let [a, b, c, d] = workspace.read(&app, |workspace, _| {
+            <[EntityId; 4]>::try_from(tab_ids(workspace)).unwrap()
+        });
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&emoji(c, "🔥", true), ctx);
+            workspace.handle_action(&emoji(d, "✅", true), ctx);
+            assert_eq!(tab_ids(workspace), [a, b, c, d], "labels move nothing");
+            assert!(workspace.tabs.iter().all(|tab| !tab.pinned));
+            assert_eq!(workspace.starred_boundary(), 0);
+        });
+
+        set_float_tagged_tabs(&mut app, true);
+        workspace.update(&mut app, |workspace, ctx| {
+            assert_eq!(tab_ids(workspace), [c, d, a, b], "both float, in order");
+            assert_eq!(workspace.starred_boundary(), 2);
+            // An old star: a tab floating with no emoji of its own.
+            workspace.pin_tab(2, ctx);
+            assert_eq!(tab_ids(workspace), [c, d, a, b]);
+        });
+
+        set_float_tagged_tabs(&mut app, false);
+        workspace.read(&app, |workspace, _| {
+            assert!(workspace.tabs.iter().all(|tab| !tab.pinned), "none floats");
+            assert_eq!(
+                tab_ids(workspace),
+                [c, d, a, b],
+                "each settles where it was"
+            );
+            assert_eq!(
+                tab_tags(workspace),
+                [
+                    vec!["🔥".to_owned()],
+                    vec!["✅".to_owned()],
+                    vec![STAR.to_owned()],
+                    vec![],
+                ]
+            );
+        });
+    });
+}
+
+/// A tab in a group wears emoji like any other and stays with its group; once
+/// it leaves the group it floats.
+#[test]
+fn a_grouped_tab_keeps_its_group_and_floats_once_it_leaves() {
     let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
     let _stars = FeatureFlag::StarredTabs.override_enabled(true);
     let _groups = FeatureFlag::GroupedTabs.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = workspace_with_tabs(&mut app, 3);
+        workspace.update(&mut app, |workspace, ctx| {
+            let c = workspace.tabs[2].pane_group.id();
+            workspace.handle_action(&WorkspaceAction::NewTabGroupFromTab(2), ctx);
+            workspace.handle_action(&emoji(c, "🔥", true), ctx);
+            let index = workspace.tab_index_of(c).expect("c is open");
+            let tab = &workspace.tabs[index];
+            assert!(tab.group_id.is_some(), "it stays in its group");
+            assert!(!tab.pinned, "a group member doesn't float on its own");
+            assert_eq!(tab.tags.to_vec(), ["🔥"]);
+
+            workspace.handle_action(&WorkspaceAction::RemoveTabFromGroup(index), ctx);
+            assert_eq!(tab_ids(workspace)[0], c, "out of the group, it floats");
+            assert!(workspace.tabs[0].pinned && workspace.tabs[0].group_id.is_none());
+            assert_eq!(workspace.tabs[0].tags.to_vec(), ["🔥"]);
+        });
+    });
+}
+
+/// The palette's bulk closes say "(keep tagged)" exactly when they would spare
+/// a floating tab.
+#[test]
+fn the_palette_says_what_the_bulk_close_keys_will_do() {
+    let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
+    let _stars = FeatureFlag::StarredTabs.override_enabled(true);
 
     App::test((), |mut app| async move {
         initialize_app(&mut app);
@@ -934,52 +938,35 @@ fn the_palette_says_what_the_star_and_bulk_close_keys_will_do() {
             };
 
             workspace.handle_action(&WorkspaceAction::ActivateTab(3), ctx);
-            assert_eq!(star_description(workspace), None);
             assert_eq!(others(workspace).as_deref(), Some("close other tabs"));
             assert_eq!(below(workspace), None, "nothing below the last tab");
 
-            // The active tab starred: it moves to the top.
-            workspace.handle_action(&WorkspaceAction::ToggleActiveTabStar, ctx);
-            assert_eq!(
-                star_description(workspace).as_deref(),
-                Some("unstar current tab")
-            );
+            // The active tab tagged: it floats to the top.
+            let active = workspace.tabs[3].pane_group.id();
+            workspace.handle_action(&emoji(active, "🔥", true), ctx);
             assert_eq!(others(workspace).as_deref(), Some("close other tabs"));
             assert_eq!(below(workspace).as_deref(), Some("close tabs below"));
 
-            // A second starred tab, below the active one.
+            // A second tagged tab, below the active one.
             let second = workspace.tabs[1].pane_group.id();
-            workspace.handle_action(&star(second, true), ctx);
+            workspace.handle_action(&emoji(second, "✅", true), ctx);
             assert_eq!(
                 others(workspace).as_deref(),
-                Some("close other tabs (keep starred)")
+                Some("close other tabs (keep tagged)")
             );
             assert_eq!(
                 below(workspace).as_deref(),
-                Some("close tabs below (keep starred)")
-            );
-
-            // An unstarred, grouped active tab: starring pulls it out.
-            workspace.handle_action(&WorkspaceAction::ActivateTab(3), ctx);
-            workspace.handle_action(&WorkspaceAction::NewTabGroupFromTab(3), ctx);
-            assert_eq!(
-                star_description(workspace).as_deref(),
-                Some("star current tab (leaves group)")
-            );
-            assert_eq!(below(workspace), None);
-            assert_eq!(
-                others(workspace).as_deref(),
-                Some("close other tabs (keep starred)")
+                Some("close tabs below (keep tagged)")
             );
         });
     });
 }
 
 /// Every bulk close, from every tab of every list of up to five tabs with every
-/// length of starred block: it closes exactly the unstarred tabs in its range,
-/// and never a starred one.
+/// length of floating block: it closes exactly the other tabs in its range, and
+/// never a floating one.
 #[test]
-fn bulk_closes_never_close_a_starred_tab() {
+fn bulk_closes_never_close_a_floating_tab() {
     let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
     let _stars = FeatureFlag::StarredTabs.override_enabled(true);
 
@@ -987,7 +974,7 @@ fn bulk_closes_never_close_a_starred_tab() {
         initialize_app(&mut app);
         let mut cases = 0;
         for tab_count in 1..=5 {
-            for starred in 0..=tab_count {
+            for tagged in 0..=tab_count {
                 for index in 0..tab_count {
                     for close in [
                         WorkspaceAction::CloseOtherTabs(index),
@@ -998,8 +985,8 @@ fn bulk_closes_never_close_a_starred_tab() {
                         let workspace = workspace_with_tabs(&mut app, tab_count);
                         workspace.update(&mut app, |workspace, ctx| {
                             let ids = tab_ids(workspace);
-                            for id in &ids[..starred] {
-                                workspace.handle_action(&star(*id, true), ctx);
+                            for id in &ids[..tagged] {
+                                workspace.handle_action(&emoji(*id, "🔥", true), ctx);
                             }
                             assert_eq!(tab_ids(workspace), ids);
                             workspace.handle_action(&WorkspaceAction::ActivateTab(index), ctx);
@@ -1012,9 +999,7 @@ fn bulk_closes_never_close_a_starred_tab() {
                                 .iter()
                                 .enumerate()
                                 .filter(|(i, _)| {
-                                    *i < starred
-                                        || *i == index
-                                        || (!closes_both_sides && *i < index)
+                                    *i < tagged || *i == index || (!closes_both_sides && *i < index)
                                 })
                                 .map(|(_, id)| *id)
                                 .collect();
@@ -1022,7 +1007,7 @@ fn bulk_closes_never_close_a_starred_tab() {
                             assert_eq!(
                                 tab_ids(workspace),
                                 survivors,
-                                "{close:?} from tab {index} of {tab_count}, {starred} starred"
+                                "{close:?} from tab {index} of {tab_count}, {tagged} tagged"
                             );
                         });
                         cases += 1;
@@ -1046,13 +1031,15 @@ impl Rng {
     }
 }
 
-/// One step of the zone sweep: everything that stars, moves, adds, closes,
-/// reopens, groups or jumps between tabs.
+const SWEEP_EMOJI: [&str; 4] = ["🔥", "✅", "🧪", "💤"];
+
+/// One step of the float sweep: everything that tags, moves, adds, closes,
+/// reopens, groups or jumps between tabs, and the float setting itself.
 #[derive(Clone, Copy, Debug)]
 enum Step {
-    Star(usize),
-    Unstar(usize),
-    ToggleActive,
+    Tag(usize, &'static str),
+    Untag(usize, &'static str),
+    ToggleFloat,
     Activate(usize),
     MoveUp(usize),
     MoveDown(usize),
@@ -1075,28 +1062,29 @@ enum Step {
 impl Step {
     fn random(rng: &mut Rng, tab_count: usize) -> Self {
         let tab = rng.below(tab_count);
-        match rng.below(20) {
-            0 => Step::Star(tab),
-            1 => Step::Unstar(tab),
-            2 => Step::ToggleActive,
-            3 => Step::Activate(tab),
-            4 => Step::MoveUp(tab),
-            5 => Step::MoveDown(tab),
-            6 if tab_count < 7 => Step::Add,
-            7 if tab_count > 1 => Step::Close(tab),
-            8 => Step::Reopen,
-            9 => Step::NewGroup(tab),
-            10 => Step::JoinGroup(tab),
-            11 => Step::LeaveGroup(tab),
-            12 => Step::StarGroup(tab),
-            13 => Step::UnstarGroup(tab),
-            14 => Step::CloseOthers(tab),
-            15 => Step::CloseBelow(tab),
-            16 => Step::CloseNonActive,
-            17 => Step::CloseBelowActive,
-            18 => Step::MarkUnread(tab),
-            19 => Step::JumpToNextUnread,
-            _ => Step::Star(tab),
+        let emoji = SWEEP_EMOJI[rng.below(SWEEP_EMOJI.len())];
+        match rng.below(21) {
+            0 | 1 => Step::Tag(tab, emoji),
+            2 => Step::Untag(tab, emoji),
+            3 => Step::ToggleFloat,
+            4 => Step::Activate(tab),
+            5 => Step::MoveUp(tab),
+            6 => Step::MoveDown(tab),
+            7 if tab_count < 7 => Step::Add,
+            8 if tab_count > 1 => Step::Close(tab),
+            9 => Step::Reopen,
+            10 => Step::NewGroup(tab),
+            11 => Step::JoinGroup(tab),
+            12 => Step::LeaveGroup(tab),
+            13 => Step::StarGroup(tab),
+            14 => Step::UnstarGroup(tab),
+            15 => Step::CloseOthers(tab),
+            16 => Step::CloseBelow(tab),
+            17 => Step::CloseNonActive,
+            18 => Step::CloseBelowActive,
+            19 => Step::MarkUnread(tab),
+            20 => Step::JumpToNextUnread,
+            _ => Step::Tag(tab, emoji),
         }
     }
 
@@ -1133,9 +1121,8 @@ impl Step {
         let id = |index: usize| workspace.tabs[index].pane_group.id();
         let group = |index: usize| workspace.tabs[index].group_id;
         Some(match self {
-            Step::Star(index) => star(id(index), true),
-            Step::Unstar(index) => star(id(index), false),
-            Step::ToggleActive => WorkspaceAction::ToggleActiveTabStar,
+            Step::Tag(index, tag) => emoji(id(index), tag, true),
+            Step::Untag(index, tag) => emoji(id(index), tag, false),
             Step::Activate(index) => WorkspaceAction::ActivateTab(index),
             Step::MoveUp(index) => WorkspaceAction::MoveTabLeft(index),
             Step::MoveDown(index) => WorkspaceAction::MoveTabRight(index),
@@ -1165,23 +1152,26 @@ impl Step {
                 unread: true,
             },
             Step::JumpToNextUnread => WorkspaceAction::JumpToNextUnreadTab,
-            Step::Add | Step::Reopen => return None,
+            Step::Add | Step::Reopen | Step::ToggleFloat => return None,
         })
     }
 }
 
-/// What the zone sweep checks a step against.
+/// What the float sweep checks a step against.
 struct Before {
     active: EntityId,
-    starred: Vec<EntityId>,
+    floating: Vec<EntityId>,
+    float: bool,
 }
 
-/// Seeded runs of 200 steps each: after every step the starred tabs are one
-/// block at the top of the list, no tab is both starred and grouped, the active
-/// tab is the same tab unless the step closed it or was meant to move focus, and
-/// no bulk close took a starred tab with it.
+/// Seeded runs of 200 steps each: after every step the floating tabs are one
+/// block at the top of the list; no tab both floats and is grouped; an
+/// ungrouped tab floats exactly when it wears emoji and the setting is on, and
+/// never with it off; no tab wears more than three; the active tab is the same
+/// tab unless the step closed it or was meant to move focus; and no bulk close
+/// took a floating tab with it.
 #[test]
-fn starred_tabs_stay_one_block_at_the_top_through_any_sequence() {
+fn tagged_tabs_stay_one_block_at_the_top_through_any_sequence() {
     let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
     let _stars = FeatureFlag::StarredTabs.override_enabled(true);
     let _unread = FeatureFlag::TabMarkUnread.override_enabled(true);
@@ -1193,16 +1183,18 @@ fn starred_tabs_stay_one_block_at_the_top_through_any_sequence() {
             let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
             let workspace = workspace_with_tabs(&mut app, 3);
             for step_number in 0..200 {
+                let float = app.read(|ctx| *TabSettings::as_ref(ctx).float_tagged_tabs.value());
                 let (step, before) = workspace.read(&app, |workspace, _| {
                     let step = Step::random(&mut rng, workspace.tabs.len());
                     let before = Before {
                         active: workspace.tabs[workspace.active_tab_index].pane_group.id(),
-                        starred: workspace
+                        floating: workspace
                             .tabs
                             .iter()
                             .filter(|tab| workspace.is_tab_effectively_pinned(tab))
                             .map(|tab| tab.pane_group.id())
                             .collect(),
+                        float,
                     };
                     (step, before)
                 });
@@ -1212,12 +1204,14 @@ fn starred_tabs_stay_one_block_at_the_top_through_any_sequence() {
                     }),
                     Step::Reopen => UndoCloseStack::handle(&app)
                         .update(&mut app, |stack, ctx| stack.undo_close(ctx)),
+                    Step::ToggleFloat => set_float_tagged_tabs(&mut app, !before.float),
                     _ => workspace.update(&mut app, |workspace, ctx| {
                         if let Some(action) = step.action(workspace) {
                             workspace.handle_action(&action, ctx);
                         }
                     }),
                 }
+                let float = app.read(|ctx| *TabSettings::as_ref(ctx).float_tagged_tabs.value());
                 workspace.read(&app, |workspace, _| {
                     let context = format!("seed {seed}, step {step_number} ({step:?})");
                     let ids = tab_ids(workspace);
@@ -1225,23 +1219,32 @@ fn starred_tabs_stay_one_block_at_the_top_through_any_sequence() {
                         !ids.is_empty() && workspace.active_tab_index < ids.len(),
                         "{context}"
                     );
-                    let starred: Vec<bool> = workspace
+                    let floating: Vec<bool> = workspace
                         .tabs
                         .iter()
                         .map(|tab| workspace.is_tab_effectively_pinned(tab))
                         .collect();
                     assert!(
-                        starred.windows(2).all(|pair| pair[0] || !pair[1]),
-                        "{context}: the starred tabs must lead the list as one block, \
-                         got {starred:?}"
+                        floating.windows(2).all(|pair| pair[0] || !pair[1]),
+                        "{context}: the floating tabs must lead the list as one block, \
+                         got {floating:?}"
                     );
-                    assert!(
-                        workspace
-                            .tabs
-                            .iter()
-                            .all(|tab| !(tab.pinned && tab.group_id.is_some())),
-                        "{context}: a tab is both starred and grouped"
-                    );
+                    for tab in &workspace.tabs {
+                        assert!(
+                            !(tab.pinned && tab.group_id.is_some()),
+                            "{context}: a tab both floats and is grouped"
+                        );
+                        assert!(tab.tags.len() <= 3, "{context}: {:?}", tab.tags);
+                        if tab.group_id.is_none() && !matches!(step, Step::Reopen) {
+                            assert_eq!(
+                                tab.pinned,
+                                float && !tab.tags.is_empty(),
+                                "{context}: an ungrouped tab floats exactly when it's \
+                                 tagged and the setting is on ({:?})",
+                                tab.tags
+                            );
+                        }
+                    }
                     let active = ids[workspace.active_tab_index];
                     if step.keeps_the_active_tab()
                         || (step.closes() && ids.contains(&before.active))
@@ -1250,8 +1253,8 @@ fn starred_tabs_stay_one_block_at_the_top_through_any_sequence() {
                     }
                     if step.bulk_closes() {
                         assert!(
-                            before.starred.iter().all(|id| ids.contains(id)),
-                            "{context}: a bulk close took a starred tab"
+                            before.floating.iter().all(|id| ids.contains(id)),
+                            "{context}: a bulk close took a floating tab"
                         );
                     }
                 });

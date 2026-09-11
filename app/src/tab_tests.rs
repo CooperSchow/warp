@@ -2,17 +2,15 @@ use std::collections::HashMap;
 
 use settings::Setting as _;
 use warp_errors::report_if_error;
-use warpui::platform::OperatingSystem;
 use warpui::{App, AppContext, SingletonEntity as _};
 
 use super::{bulk_close_label, tab_group_menu_entry_flags, PaneNameMenuTarget};
 use crate::features::FeatureFlag;
 use crate::menu::MenuItem;
-use crate::util::bindings::keybinding_name_to_display_string;
 use crate::workspace::tab_group::{TabGroup, TabGroupId};
 use crate::workspace::tab_settings::{TabSettings, VerticalTabsDisplayGranularity};
+use crate::workspace::view::tab_tags::TabTags;
 use crate::workspace::view::tests::{initialize_app, mock_workspace};
-use crate::workspace::view::TOGGLE_ACTIVE_TAB_STAR_BINDING_NAME;
 use crate::workspace::{PaneViewLocator, Workspace, WorkspaceAction};
 
 /// Build a `tab_groups` map containing exactly the given group ids.
@@ -228,7 +226,10 @@ fn tab_menu_is_unchanged_with_tab_mark_flags_off() {
 }
 
 /// With the flags on, the menu opens with the tab-marks section: Mark as
-/// Unread, then the star item, with no separator between them.
+/// Unread, then the emoji item, with no separator between them. The item
+/// reads "Edit emoji…" on a tab that wears some, a floating tab with none of
+/// its own included, since it wears ⭐; and a grouped tab is tagged in its
+/// group, so its item says nothing more.
 #[test]
 fn tab_marks_section_opens_the_menu() {
     let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
@@ -255,15 +256,19 @@ fn tab_marks_section_opens_the_menu() {
             };
             assert_eq!(
                 opening_items(workspace, ctx),
-                ["Mark as Unread", "Star tab", "---"]
+                ["Mark as Unread", "Add emoji…", "---"]
             );
 
             workspace.tabs[0].group_id = Some(TabGroupId::new());
-            assert_eq!(opening_items(workspace, ctx)[1], "Star tab (leaves group)");
+            assert_eq!(opening_items(workspace, ctx)[1], "Add emoji…");
 
             workspace.tabs[0].group_id = None;
             workspace.tabs[0].pinned = true;
-            assert_eq!(opening_items(workspace, ctx)[1], "Unstar tab");
+            assert_eq!(opening_items(workspace, ctx)[1], "Edit emoji…");
+
+            workspace.tabs[0].pinned = false;
+            workspace.tabs[0].tags.set("🔥", true);
+            assert_eq!(opening_items(workspace, ctx)[1], "Edit emoji…");
         });
     });
 }
@@ -273,11 +278,11 @@ fn bulk_closes_spare_starred_tabs_and_say_so() {
     // Tabs 0 and 1 are starred.
     assert_eq!(
         bulk_close_label("Close other tabs", [1, 2, 3], 2).as_deref(),
-        Some("Close other tabs (keep starred)")
+        Some("Close other tabs (keep tagged)")
     );
     assert_eq!(
         bulk_close_label("Close Tabs Below", 1..4, 2).as_deref(),
-        Some("Close Tabs Below (keep starred)")
+        Some("Close Tabs Below (keep tagged)")
     );
     assert_eq!(
         bulk_close_label("Close Tabs Below", 2..4, 2).as_deref(),
@@ -290,7 +295,7 @@ fn bulk_closes_spare_starred_tabs_and_say_so() {
 
 /// Every tab's menu in every list of up to eight tabs, with every length of
 /// starred block, in both tab bars: each bulk close shows exactly when it would
-/// close a tab, and says "(keep starred)" exactly when it would spare one.
+/// close a tab, and says "(keep tagged)" exactly when it would spare one.
 #[test]
 fn bulk_close_items_across_every_small_tab_list() {
     let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
@@ -338,7 +343,7 @@ fn bulk_close_items_across_every_small_tab_list() {
                                 let expected: Vec<String> = closes
                                     .then(|| {
                                         if spares {
-                                            format!("{label} (keep starred)")
+                                            format!("{label} (keep tagged)")
                                         } else {
                                             label.to_owned()
                                         }
@@ -366,11 +371,12 @@ fn bulk_close_items_across_every_small_tab_list() {
     });
 }
 
-/// The star item reads "Star tab", "Star tab (leaves group)" or "Unstar tab"
-/// from the tab's own state. It hints the star key, as the keymap has it, on
-/// the active tab's menu only, since the key stars the active tab.
+/// The emoji item reads "Add emoji…" on a tab that wears none and "Edit
+/// emoji…" on one that wears some, a floating tab with none of its own
+/// included, since it wears ⭐. It opens the picker for its own tab, on every
+/// tab's menu alike, and hints no key: tagging is a pointer's job.
 #[test]
-fn the_star_item_follows_the_tab_and_hints_the_live_key() {
+fn the_emoji_item_follows_the_tab() {
     let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
     let _stars = FeatureFlag::StarredTabs.override_enabled(true);
     let _unread = FeatureFlag::TabMarkUnread.override_enabled(false);
@@ -379,19 +385,16 @@ fn the_star_item_follows_the_tab_and_hints_the_live_key() {
         initialize_app(&mut app);
         let workspace = mock_workspace(&mut app);
         workspace.update(&mut app, |workspace, ctx| {
-            let hint = keybinding_name_to_display_string(TOGGLE_ACTIVE_TAB_STAR_BINDING_NAME, ctx);
-            assert_eq!(
-                hint.is_some(),
-                OperatingSystem::get().is_mac(),
-                "Ctrl-Cmd-S is a macOS default only"
-            );
-            for (pinned, grouped, label) in [
-                (false, false, "Star tab"),
-                (false, true, "Star tab (leaves group)"),
-                (true, false, "Unstar tab"),
+            let pane_group_id = workspace.tabs[0].pane_group.id();
+            for (pinned, tags, label) in [
+                (false, &[][..], "Add emoji…"),
+                (true, &[][..], "Edit emoji…"),
+                (false, &["🔥"][..], "Edit emoji…"),
+                (true, &["🔥", "✅"][..], "Edit emoji…"),
             ] {
                 workspace.tabs[0].pinned = pinned;
-                workspace.tabs[0].group_id = grouped.then(TabGroupId::new);
+                workspace.tabs[0].tags =
+                    TabTags::from_stored(tags.iter().map(|tag| (*tag).to_owned()));
                 for is_active_tab in [true, false] {
                     let items = workspace.tabs[0].menu_items(
                         0,
@@ -405,12 +408,16 @@ fn the_star_item_follows_the_tab_and_hints_the_live_key() {
                         ctx,
                     );
                     let MenuItem::Item(fields) = &items[0] else {
-                        panic!("the menu opens with the star item");
+                        panic!("the menu opens with the emoji item");
                     };
                     assert_eq!(fields.label(), label);
-                    assert_eq!(
-                        fields.key_shortcut_label(),
-                        hint.as_deref().filter(|_| is_active_tab),
+                    assert_eq!(fields.key_shortcut_label(), None, "{label}");
+                    assert!(
+                        matches!(
+                            fields.on_select_action(),
+                            Some(WorkspaceAction::ToggleTabEmojiPicker { pane_group_id: id })
+                                if *id == pane_group_id
+                        ),
                         "{label}, active tab {is_active_tab}"
                     );
                 }

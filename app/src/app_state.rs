@@ -83,6 +83,9 @@ pub struct TabSnapshot {
     pub group_id: Option<TabGroupId>,
     /// True when this tab is pinned to the front of the tab list.
     pub pinned: bool,
+    /// The tab's emoji tags, as `pane_tags` stores them (see
+    /// `workspace::view::tab_tags`). Empty for a tab without its own.
+    pub tags: Vec<String>,
 }
 
 impl TabSnapshot {

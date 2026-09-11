@@ -1,9 +1,11 @@
+use std::collections::HashMap;
+
 use diesel::sql_types::{Bool, Nullable, Text};
 use diesel::sqlite::SqliteConnection;
 use diesel::{Connection, QueryDsl, QueryableByName, RunQueryDsl, SelectableHelper};
 use diesel_migrations::MigrationHarness;
-use persistence::model::{NewPaneMark, PaneMark};
-use persistence::schema::pane_marks;
+use persistence::model::{NewPaneMark, NewPaneTag, PaneMark, PaneTag};
+use persistence::schema::{pane_marks, pane_tags};
 use warp_core::features::FeatureFlag;
 use warpui::{App, EntityId};
 
@@ -155,6 +157,7 @@ fn tab(root: PaneNodeSnapshot, pinned: bool, group_id: Option<TabGroupId>) -> Ta
         right_panel: None,
         group_id,
         pinned,
+        tags: Vec::new(),
     }
 }
 
@@ -400,11 +403,167 @@ fn read_gives_no_marks_when_the_table_is_missing() {
     assert!(marks.marked_unread.is_empty());
 }
 
+/// Every row of `pane_tags`, by uuid, its emoji parsed.
+fn stored_tags(conn: &mut SqliteConnection) -> Vec<(Vec<u8>, Vec<String>)> {
+    pane_tags::table
+        .select(PaneTag::as_select())
+        .order(pane_tags::pane_uuid)
+        .load(conn)
+        .expect("pane_tags should load")
+        .into_iter()
+        .map(|row| {
+            let emojis = serde_json::from_str(&row.emojis).expect("stored emoji are JSON");
+            (row.pane_uuid, emojis)
+        })
+        .collect()
+}
+
+/// `tab`, wearing `tags`.
+fn tagged(mut tab: TabSnapshot, tags: &[&str]) -> TabSnapshot {
+    tab.tags = tags.iter().map(|tag| (*tag).to_owned()).collect();
+    tab
+}
+
+fn emoji(tags: &[&str]) -> Vec<String> {
+    tags.iter().map(|tag| (*tag).to_owned()).collect()
+}
+
+/// The migration makes `pane_tags` as the model reads it: a required blob key
+/// and a required text column.
+#[test]
+fn migration_creates_pane_tags() {
+    let mut conn = migrated_connection();
+    let columns: Vec<Column> = diesel::sql_query(
+        "SELECT name, type AS column_type, \"notnull\" AS not_null, \
+         dflt_value AS default_value, pk AS primary_key \
+         FROM pragma_table_info('pane_tags') ORDER BY cid",
+    )
+    .load(&mut conn)
+    .expect("pane_tags should exist");
+    let column = |name: &str, column_type: &str| Column {
+        name: name.to_owned(),
+        column_type: column_type.to_owned(),
+        not_null: true,
+        default_value: None,
+        primary_key: name == "pane_uuid",
+    };
+    assert_eq!(
+        columns,
+        vec![column("pane_uuid", "BLOB"), column("emojis", "TEXT")]
+    );
+}
+
+/// Every terminal pane of a tagged tab carries the tab's emoji, grouped or
+/// not, and an untagged tab's panes carry none. Each save rewrites the table,
+/// so emoji taken off since the last one are gone.
+#[test]
+fn write_stores_each_tagged_tabs_emoji_on_each_of_its_terminal_panes() {
+    let mut conn = migrated_connection();
+    let grouped = TabGroupId::new();
+    let state = app_state(vec![window(
+        vec![
+            tagged(
+                tab(
+                    split(vec![terminal(1, false), terminal(2, false)]),
+                    true,
+                    None,
+                ),
+                &["🔥", "✅"],
+            ),
+            tagged(tab(terminal(3, false), false, Some(grouped)), &["🧪"]),
+            tab(terminal(4, false), false, None),
+        ],
+        vec![group(grouped, false)],
+        0,
+    )]);
+    write_pane_marks(&mut conn, &state, BOTH_MARKS).expect("the write should succeed");
+    assert_eq!(
+        stored_tags(&mut conn),
+        vec![
+            (vec![1], emoji(&["🔥", "✅"])),
+            (vec![2], emoji(&["🔥", "✅"])),
+            (vec![3], emoji(&["🧪"])),
+        ]
+    );
+
+    let untagged = app_state(vec![window(
+        vec![tab(terminal(1, false), true, None)],
+        vec![],
+        0,
+    )]);
+    write_pane_marks(&mut conn, &untagged, BOTH_MARKS).expect("the write should succeed");
+    assert_eq!(stored_tags(&mut conn), vec![]);
+}
+
+/// Emoji go back onto restored tabs, grouped or not; a tab whose panes carry
+/// none gets none; and a row that doesn't parse is skipped rather than
+/// failing the read.
+#[test]
+fn read_brings_each_tabs_emoji_back_and_skips_an_unreadable_row() {
+    let mut conn = migrated_connection();
+    let grouped = TabGroupId::new();
+    let state = app_state(vec![window(
+        vec![
+            tagged(tab(terminal(1, false), true, None), &["🔥"]),
+            tagged(tab(terminal(2, false), false, Some(grouped)), &["🧪", "💤"]),
+        ],
+        vec![group(grouped, false)],
+        0,
+    )]);
+    write_pane_marks(&mut conn, &state, BOTH_MARKS).expect("the write should succeed");
+    diesel::insert_into(pane_tags::table)
+        .values(NewPaneTag {
+            pane_uuid: vec![9],
+            emojis: "not json".to_owned(),
+        })
+        .execute(&mut conn)
+        .expect("a bad row inserts");
+
+    let marks = read_pane_marks(&mut conn, BOTH_MARKS);
+    assert_eq!(marks.tags.len(), 2, "the unreadable row is skipped");
+
+    let mut floating = tab(terminal(1, false), true, None);
+    marks.apply_to_tab(&mut floating);
+    assert_eq!(floating.tags, emoji(&["🔥"]));
+    let mut member = tab(terminal(2, false), false, Some(grouped));
+    marks.apply_to_tab(&mut member);
+    assert_eq!(member.tags, emoji(&["🧪", "💤"]));
+    let mut plain = tab(terminal(5, false), false, None);
+    marks.apply_to_tab(&mut plain);
+    assert!(plain.tags.is_empty());
+}
+
+/// A save by a build without tags, the stand-in for a rollback, leaves
+/// `pane_tags` alone, so the emoji are there when a build with tags runs again.
+#[test]
+fn a_save_with_tags_off_leaves_the_stored_emoji_alone() {
+    let mut conn = migrated_connection();
+    let state = app_state(vec![window(
+        vec![tagged(tab(terminal(1, false), true, None), &["🔥"])],
+        vec![],
+        0,
+    )]);
+    write_pane_marks(&mut conn, &state, BOTH_MARKS).expect("the write should succeed");
+
+    let tags_off = MarkColumns {
+        starred: false,
+        marked_unread: true,
+    };
+    let plain = app_state(vec![window(
+        vec![tab(terminal(1, false), false, None)],
+        vec![],
+        0,
+    )]);
+    write_pane_marks(&mut conn, &plain, tags_off).expect("the write should succeed");
+    assert_eq!(stored_tags(&mut conn), vec![(vec![1], emoji(&["🔥"]))]);
+}
+
 #[test]
 fn restored_marks_light_their_panes_and_star_only_ungrouped_tabs() {
     let marks = PaneMarks {
         starred: [vec![1]].into_iter().collect(),
         marked_unread: [vec![2]].into_iter().collect(),
+        tags: HashMap::new(),
     };
 
     let mut ungrouped = tab(

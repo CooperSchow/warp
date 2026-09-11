@@ -922,11 +922,12 @@ fn a_dot_on_the_selected_row_is_painted_in_the_title_ink() {
 struct HorizontalTabMarks {
     /// The tab's unread dots, with their inks.
     dots: Vec<(pathfinder_geometry::rect::RectF, ColorU)>,
-    /// The tab's stars.
+    /// The star icons painted on the tab, which no tab wears now that its
+    /// emoji lead its title.
     stars: Vec<pathfinder_geometry::rect::RectF>,
     /// The title's box, which ends where its clip and fade end.
     title: pathfinder_geometry::rect::RectF,
-    /// The close button's slot, where a starred tab wears its star.
+    /// The close button's slot.
     slot: pathfinder_geometry::rect::RectF,
 }
 
@@ -1030,14 +1031,12 @@ fn painted_horizontal_tab_marks(
 /// With TabMarkUnread on, the horizontal tab bar shows the unread dot on each
 /// tab whose vertical row would show it, any tab with an unread terminal pane:
 /// in the title's ink on the active tab and the accent on the rest. It leads
-/// the title, clear of the title, of a starred tab's star and of the close
-/// button's slot. A starred tab's title ends the star's gap before that slot,
-/// so its clip and fade stop short of the star. With the flag off the bar
-/// shows no dot, as upstream's doesn't.
+/// the title, clear of the title and of the close button's slot. A floating
+/// tab wears nothing in that slot: its emoji lead its title instead. With the
+/// flag off the bar shows no dot, as upstream's doesn't.
 #[test]
-fn the_horizontal_tab_bar_shows_the_dot_clear_of_the_title_and_the_star() {
+fn the_horizontal_tab_bar_shows_the_dot_clear_of_the_title() {
     use crate::appearance::Appearance;
-    use crate::workspace::view::starred_tabs::STAR_TITLE_GAP;
 
     let _pins = FeatureFlag::PinnedTabs.override_enabled(true);
     let _stars = FeatureFlag::StarredTabs.override_enabled(true);
@@ -1101,20 +1100,11 @@ fn the_horizontal_tab_bar_shows_the_dot_clear_of_the_title_and_the_star() {
                     );
                 }
             }
-            let starred = &marks[0];
-            assert_eq!(
-                starred.stars.len(),
-                1,
-                "{context}: the starred tab wears its star"
-            );
+            let floating = &marks[0];
             assert!(
-                starred.slot.contains_rect(starred.stars[0]),
-                "{context}: the star is in the close button's slot: {starred:?}"
-            );
-            assert!(
-                starred.title.max_x() + STAR_TITLE_GAP <= starred.slot.min_x() + 0.01,
-                "{context}: the title's clip and fade end a gap before the star's slot: \
-                 {starred:?}"
+                floating.stars.is_empty(),
+                "{context}: a floating tab wears no star in the close button's slot: \
+                 {floating:?}"
             );
         });
     }

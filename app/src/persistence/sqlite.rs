@@ -2569,6 +2569,7 @@ fn read_sqlite_data(
                                 .tab_group_id
                                 .and_then(|row_id| tab_group_id_by_row_id.get(&row_id).copied());
                             let mut tab_snapshot = TabSnapshot {
+                                tags: Vec::new(),
                                 root,
                                 custom_title: tab.custom_title,
                                 default_directory_color: None,

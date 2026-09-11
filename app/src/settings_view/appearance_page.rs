@@ -94,7 +94,7 @@ use crate::window_settings::{
 };
 use crate::workspace::header_toolbar_editor::HeaderToolbarInlineEditor;
 use crate::workspace::tab_settings::{
-    canonical_directory_key, ClaudeAutoColorRule, DirectoryTabColor,
+    canonical_directory_key, ClaudeAutoColorRule, DirectoryTabColor, FloatTaggedTabs,
     HideTitleBarSearchBarInVerticalTabs, PreserveActiveTabColor, ShowCodeReviewButton,
     ShowIndicatorsButton, ShowVerticalTabPanelInRestoredWindows, TabCloseButtonPosition,
     TabSettings, TabSettingsChangedEvent, UseLatestUserPromptAsConversationTitleInTabNames,
@@ -559,6 +559,7 @@ pub enum AppearancePageAction {
     ClaudeRuleDelete(usize),
     ClaudeRuleCancelEdit,
     ToggleClaudeAutoTabColors,
+    ToggleFloatTaggedTabs,
 }
 
 /// What the shared [`ColorPickerPopover`] is currently editing.
@@ -840,6 +841,12 @@ impl TypedActionView for AppearanceSettingsPageView {
             ToggleClaudeAutoTabColors => {
                 TabSettings::handle(ctx).update(ctx, |settings, ctx| {
                     report_if_error!(settings.claude_auto_tab_colors.toggle_and_save_value(ctx));
+                });
+                ctx.notify();
+            }
+            ToggleFloatTaggedTabs => {
+                TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(settings.float_tagged_tabs.toggle_and_save_value(ctx));
                 });
                 ctx.notify();
             }
@@ -1638,6 +1645,9 @@ impl AppearanceSettingsPageView {
             tab_settings_widgets.push(Box::new(TabCloseButtonPositionWidget::default()));
         }
         tab_settings_widgets.push(Box::new(PreserveActiveTabColorWidget::default()));
+        if FeatureFlag::PinnedTabs.is_enabled() && FeatureFlag::StarredTabs.is_enabled() {
+            tab_settings_widgets.push(Box::new(FloatTaggedTabsWidget::default()));
+        }
 
         if FeatureFlag::VerticalTabs.is_enabled() {
             tab_settings_widgets.push(Box::new(VerticalTabsWidget::default()));
@@ -5331,6 +5341,54 @@ impl SettingsWidget for ShowVerticalTabPanelInRestoredWindowsWidget {
                 .finish(),
             Some(
                 "When enabled, reopening or restoring a window opens the vertical tabs panel even if it was closed when the window was last saved."
+                    .to_string(),
+            ),
+        )
+    }
+}
+
+#[derive(Default)]
+struct FloatTaggedTabsWidget {
+    switch_state: SwitchStateHandle,
+}
+
+impl SettingsWidget for FloatTaggedTabsWidget {
+    type View = AppearanceSettingsPageView;
+
+    fn search_terms(&self) -> &str {
+        "emoji tag tagged float top pin favorite star tabs"
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let tab_settings = TabSettings::as_ref(app);
+
+        render_body_item::<AppearancePageAction>(
+            "Float tagged tabs to the top".into(),
+            None,
+            LocalOnlyIconState::for_setting(
+                FloatTaggedTabs::storage_key(),
+                FloatTaggedTabs::sync_to_cloud(),
+                &mut view.local_only_icon_tooltip_states.borrow_mut(),
+                app,
+            ),
+            ToggleState::Enabled,
+            appearance,
+            appearance
+                .ui_builder()
+                .switch(self.switch_state.clone())
+                .check(*tab_settings.float_tagged_tabs)
+                .build()
+                .on_click(move |ctx, _, _| {
+                    ctx.dispatch_typed_action(AppearancePageAction::ToggleFloatTaggedTabs);
+                })
+                .finish(),
+            Some(
+                "Tabs wearing emoji sit at the top of the tab list, and closing other tabs leaves them open. When off, emoji are labels, and every tab stays where it is."
                     .to_string(),
             ),
         )

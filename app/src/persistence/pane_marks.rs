@@ -1,5 +1,6 @@
-//! Mirrors each terminal pane's marks, its star and its manual unread mark,
-//! into the `pane_marks` table.
+//! Mirrors each terminal pane's marks, into the `pane_marks` table: whether
+//! its tab floats (the column keeps its name from when floating tabs were
+//! starred) and its manual unread mark. Its tab's emoji go into `pane_tags`.
 //!
 //! The marks can't live in `tabs` or `terminal_panes`: `save_app_state`
 //! deletes and re-inserts both on every save, so the first save of a build
@@ -14,8 +15,8 @@ use diesel::sqlite::SqliteConnection;
 use diesel::{Connection, QueryDsl, RunQueryDsl, SelectableHelper};
 use warp_core::features::FeatureFlag;
 
-use super::model::{NewPaneMark, PaneMark};
-use super::schema::pane_marks;
+use super::model::{NewPaneMark, NewPaneTag, PaneMark, PaneTag};
+use super::schema::{pane_marks, pane_tags};
 use crate::app_state::{AppState, TabSnapshot, WindowSnapshot};
 use crate::workspace::tab_group::TabGroupId;
 use crate::workspace::view::starred_tabs::starred_tabs_enabled;
@@ -49,12 +50,16 @@ impl MarkColumns {
 pub(super) struct PaneMarks {
     pub starred: HashSet<Vec<u8>>,
     pub marked_unread: HashSet<Vec<u8>>,
+    /// Each tagged pane's emoji, as stored.
+    pub tags: HashMap<Vec<u8>, Vec<String>>,
 }
 
 impl PaneMarks {
     /// Puts the marks back on a restored tab: each terminal pane's unread
-    /// mark, and a star on an ungrouped tab one of whose terminal panes is
-    /// starred, which `tabs.pinned` alone loses to an older build's save.
+    /// mark; the float of an ungrouped tab one of whose terminal panes floats,
+    /// which `tabs.pinned` alone loses to an older build's save; and the tab's
+    /// emoji, from the first of its terminal panes that has any. The workspace
+    /// floats a tagged tab afterwards when the setting says to.
     pub(super) fn apply_to_tab(&self, tab: &mut TabSnapshot) {
         tab.root.for_each_terminal_leaf_mut(&mut |terminal| {
             terminal.marked_unread |= self.marked_unread.contains(&terminal.uuid);
@@ -66,6 +71,13 @@ impl PaneMarks {
                 .into_iter()
                 .any(|uuid| self.starred.contains(uuid));
         }
+        tab.tags = tab
+            .root
+            .terminal_leaf_uuids()
+            .into_iter()
+            .find_map(|uuid| self.tags.get(uuid))
+            .cloned()
+            .unwrap_or_default();
     }
 }
 
@@ -148,6 +160,42 @@ pub(super) fn write_pane_marks(
             .values(chunk)
             .execute(conn)?;
     }
+    if columns.starred {
+        write_pane_tags(conn, app_state)?;
+    }
+    Ok(())
+}
+
+/// Rewrites `pane_tags` from `app_state`: every terminal pane of a tagged tab,
+/// grouped or not, carries the tab's emoji, as a JSON array.
+fn write_pane_tags(conn: &mut SqliteConnection, app_state: &AppState) -> diesel::QueryResult<()> {
+    // Keyed by uuid, so a pane listed twice still gets one row.
+    let mut tags: BTreeMap<&[u8], String> = BTreeMap::new();
+    for tab in app_state.windows.iter().flat_map(|window| &window.tabs) {
+        if tab.tags.is_empty() {
+            continue;
+        }
+        let emojis = serde_json::to_string(&tab.tags).expect("a list of strings serializes");
+        for terminal in tab.root.terminal_leaves() {
+            tags.entry(terminal.uuid.as_slice())
+                .or_insert_with(|| emojis.clone());
+        }
+    }
+
+    diesel::delete(pane_tags::table).execute(conn)?;
+    let mut rows = tags
+        .into_iter()
+        .map(|(uuid, emojis)| NewPaneTag {
+            pane_uuid: uuid.to_vec(),
+            emojis,
+        })
+        .peekable();
+    while rows.peek().is_some() {
+        let chunk: Vec<NewPaneTag> = rows.by_ref().take(ROWS_PER_INSERT).collect();
+        diesel::insert_into(pane_tags::table)
+            .values(chunk)
+            .execute(conn)?;
+    }
     Ok(())
 }
 
@@ -177,7 +225,37 @@ pub(super) fn read_pane_marks(conn: &mut SqliteConnection, columns: MarkColumns)
             marks.marked_unread.insert(row.pane_uuid);
         }
     }
+    if columns.starred {
+        marks.tags = read_pane_tags(conn);
+    }
     marks
+}
+
+/// Each tagged pane's emoji, read back for restore. A row that doesn't parse
+/// is skipped, and the table not reading leaves none, so a floating tab then
+/// comes back wearing ⭐.
+fn read_pane_tags(conn: &mut SqliteConnection) -> HashMap<Vec<u8>, Vec<String>> {
+    let rows = match pane_tags::table
+        .select(PaneTag::as_select())
+        .load::<PaneTag>(conn)
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            log::warn!("Couldn't read tab emoji from pane_tags; restoring without them: {err}");
+            return HashMap::new();
+        }
+    };
+    rows.into_iter()
+        .filter_map(
+            |row| match serde_json::from_str::<Vec<String>>(&row.emojis) {
+                Ok(emojis) => Some((row.pane_uuid, emojis)),
+                Err(err) => {
+                    log::warn!("Skipping a pane's unreadable emoji in pane_tags: {err}");
+                    None
+                }
+            },
+        )
+        .collect()
 }
 
 /// Puts a window's starred tabs back into one block at the front, after stars

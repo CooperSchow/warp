@@ -51,16 +51,15 @@ use crate::workspace::tab_group::{TabGroup, TabGroupId};
 use crate::workspace::tab_settings::{
     TabCloseButtonPosition, TabSettings, VerticalTabsDisplayGranularity,
 };
-use crate::workspace::view::starred_tabs::{
-    render_pin_slot_mark, starred_tabs_enabled, STAR_TITLE_GAP,
+use crate::workspace::view::starred_tabs::{render_pin_slot_mark, starred_tabs_enabled};
+use crate::workspace::view::tab_tags::{
+    render_tags, worn_tags, TabTags, TAGS_TITLE_GAP, TITLE_TAG_SIZE,
 };
 use crate::workspace::view::tab_unread::{
     render_unread_dot, row_shows_unread, row_terminal_view, tab_is_unread, tab_mark_target,
     tab_unread_terminal_views, toggle_key_acts_on_pane, unread_dot_ink,
 };
-use crate::workspace::view::{
-    TOGGLE_ACTIVE_TAB_STAR_BINDING_NAME, TOGGLE_ACTIVE_TAB_UNREAD_BINDING_NAME,
-};
+use crate::workspace::view::TOGGLE_ACTIVE_TAB_UNREAD_BINDING_NAME;
 use crate::workspace::{
     PaneViewLocator, TabBarDropTargetData, TabBarLocation, TabContextMenuAnchor, WorkspaceAction,
 };
@@ -114,7 +113,7 @@ pub(crate) fn bulk_close_label(
     match (spared, closed) {
         (_, 0) => None,
         (0, _) => Some(label.to_owned()),
-        _ => Some(format!("{label} (keep starred)")),
+        _ => Some(format!("{label} (keep tagged)")),
     }
 }
 
@@ -140,11 +139,6 @@ pub(crate) const COMPACT_TAB_WIDTH_THRESHOLD: f32 = 42.0;
 const TAB_CLOSE_BUTTON_HORIZONTAL_INSET: f32 = 2.0;
 // Padding on each side of a pinned tab, reserving the pin's footprint so the title clips before it.
 const TAB_PINNED_CONTENT_HORIZONTAL_PADDING: f32 = 26.0;
-// The same with stars on: the pin's footprint and then the gap the vertical rows leave between a
-// star and its title, so the title's clip and fade end short of the star's slot rather than run
-// into the star.
-const TAB_STARRED_CONTENT_HORIZONTAL_PADDING: f32 =
-    TAB_PINNED_CONTENT_HORIZONTAL_PADDING + STAR_TITLE_GAP;
 // The gap between the unread dot and the title it leads, the one the vertical rows leave between a
 // title and its dot.
 const UNREAD_DOT_TITLE_GAP: f32 = 4.0;
@@ -288,6 +282,10 @@ pub struct TabData {
     pub in_multi_selection: bool,
     /// True when this tab is pinned to the front of the tab list.
     pub pinned: bool,
+    /// The emoji this tab wears (see `workspace::view::tab_tags`). While
+    /// tagged tabs float, which they do by default, an ungrouped tab that
+    /// wears any is pinned too.
+    pub tags: TabTags,
 }
 
 const TAB_COLOR_ICON_PATH: &str = "bundled/svg/ellipse.svg";
@@ -308,6 +306,7 @@ impl TabData {
             group_id: None,
             in_multi_selection: false,
             pinned: false,
+            tags: TabTags::default(),
         }
     }
 
@@ -745,8 +744,9 @@ impl TabData {
     }
 
     /// The tab-marks section that opens the menu: Mark as Unread (or Mark as
-    /// Read), then Star (or Unstar). One builder, so no separator falls between
-    /// the two. Without `StarredTabs`, upstream's Pin / Unpin stands in for Star.
+    /// Read), then Add emoji… (or Edit emoji…). One builder, so no separator
+    /// falls between the two. Without `StarredTabs`, upstream's Pin / Unpin
+    /// stands in for the emoji item.
     fn tab_marks_menu_items(
         &self,
         index: usize,
@@ -756,7 +756,7 @@ impl TabData {
     ) -> Vec<MenuItem<WorkspaceAction>> {
         self.unread_menu_item(is_active_tab, pane_name_target, ctx)
             .into_iter()
-            .chain(self.star_menu_item(index, is_active_tab, ctx))
+            .chain(self.emoji_menu_item(index))
             .collect()
     }
 
@@ -842,37 +842,24 @@ impl TabData {
         )
     }
 
-    /// "Star tab" or "Unstar tab"; upstream's "Pin tab" or "Unpin tab" when
-    /// pins are on but stars are off.
-    fn star_menu_item(
-        &self,
-        index: usize,
-        is_active_tab: bool,
-        ctx: &AppContext,
-    ) -> Option<MenuItem<WorkspaceAction>> {
+    /// "Add emoji…", or "Edit emoji…" on a tab that wears some, which opens
+    /// the emoji picker for this tab; upstream's "Pin tab" or "Unpin tab" when
+    /// pins are on but tags are off.
+    fn emoji_menu_item(&self, index: usize) -> Option<MenuItem<WorkspaceAction>> {
         if !FeatureFlag::PinnedTabs.is_enabled() {
             return None;
         }
         let item = if starred_tabs_enabled() {
-            let label = match (self.pinned, self.group_id.is_some()) {
-                (true, _) => "Unstar tab",
-                // Starring pulls a tab out of its group; the label says so up front.
-                (false, true) => "Star tab (leaves group)",
-                (false, false) => "Star tab",
-            };
-            // ⌃⌘S stars the active tab, so it does what this item does only
-            // when this is the active tab.
-            let hint = if is_active_tab {
-                keybinding_name_to_display_string(TOGGLE_ACTIVE_TAB_STAR_BINDING_NAME, ctx)
+            let label = if worn_tags(&self.tags, self.pinned).is_empty() {
+                "Add emoji…"
             } else {
-                None
+                "Edit emoji…"
             };
-            MenuItemFields::new(label)
-                .with_key_shortcut_label(hint)
-                .with_on_select_action(WorkspaceAction::SetTabStarred {
+            MenuItemFields::new(label).with_on_select_action(
+                WorkspaceAction::ToggleTabEmojiPicker {
                     pane_group_id: self.pane_group.id(),
-                    starred: !self.pinned,
-                })
+                },
+            )
         } else {
             let (label, action) = if self.pinned {
                 ("Unpin tab", WorkspaceAction::UnpinTab(index))
@@ -1696,14 +1683,14 @@ impl<'a> TabComponent<'a> {
                 })
                 .finish()
         } else if !is_narrow && self.show_pin_indicator() {
-            // Pinned: render the pin, or the star with stars on, in the exact
-            // slot the close button uses so hovering swaps icons in place
-            // without changing the layout.
+            // Pinned: render the pin in the exact slot the close button uses so
+            // hovering swaps icons in place without changing the layout.
             let theme = self.appearance.theme();
             ConstrainedBox::new(
                 Align::new(render_pin_slot_mark(
                     TAB_PIN_INDICATOR_ICON_SIZE,
                     theme.main_text_color(theme.background()),
+                    self.appearance.ui_font_family(),
                 ))
                 .finish(),
             )
@@ -1725,9 +1712,13 @@ impl<'a> TabComponent<'a> {
 
     /// True when this tab should display the pinned indicator in its close-
     /// button slot: pinning is enabled, the tab is pinned, and it isn't a
-    /// grouped member (groups render their own pin).
+    /// grouped member (groups render their own pin). With tags on a floating
+    /// tab wears its emoji before its title instead.
     fn show_pin_indicator(&self) -> bool {
-        FeatureFlag::PinnedTabs.is_enabled() && self.tab.pinned && !self.grouped_member
+        FeatureFlag::PinnedTabs.is_enabled()
+            && !starred_tabs_enabled()
+            && self.tab.pinned
+            && !self.grouped_member
     }
 
     fn render_indicator(&self) -> Option<Box<dyn Element>> {
@@ -1959,10 +1950,10 @@ impl<'a> TabComponent<'a> {
             ))
         };
         // The dot sits against the title on the side away from the close
-        // button's slot, where a starred tab wears its star, so it never meets
-        // the title, the star or the close button.
+        // button's slot, so it never meets the title or the close button.
         let close_button_on_left = FeatureFlag::TabCloseButtonOnLeft.is_enabled()
             && matches!(self.close_button_position, TabCloseButtonPosition::Left);
+        let tags = worn_tags(&self.tab.tags, self.tab.pinned);
         let build_full_content = |reserve_pin_space: bool| -> Box<dyn Element> {
             let mut flex_row = Flex::row()
                 .with_main_axis_size(MainAxisSize::Max)
@@ -1977,6 +1968,19 @@ impl<'a> TabComponent<'a> {
             }
             if let Some(indicator) = self.render_indicator() {
                 flex_row.add_child(indicator);
+            }
+            // A tagged tab's emoji lead its title, as they do in the vertical
+            // tabs panel.
+            if !tags.is_empty() {
+                flex_row.add_child(
+                    Container::new(render_tags(
+                        &tags,
+                        TITLE_TAG_SIZE,
+                        self.appearance.ui_font_family(),
+                    ))
+                    .with_margin_right(TAGS_TITLE_GAP)
+                    .finish(),
+                );
             }
             flex_row.add_child(
                 Shrinkable::new(
@@ -1994,14 +1998,11 @@ impl<'a> TabComponent<'a> {
                 );
             }
             // Equal padding on both sides so the title stays centered; the pin
-            // vanishes before it can reach the title, and a star keeps a gap
-            // from the title's fade.
-            let horizontal_padding = if !reserve_pin_space {
-                8.
-            } else if starred_tabs_enabled() {
-                TAB_STARRED_CONTENT_HORIZONTAL_PADDING
-            } else {
+            // vanishes before it can reach the title.
+            let horizontal_padding = if reserve_pin_space {
                 TAB_PINNED_CONTENT_HORIZONTAL_PADDING
+            } else {
+                8.
             };
             let mut container =
                 Container::new(flex_row.finish()).with_horizontal_padding(horizontal_padding);

@@ -1,69 +1,47 @@
-//! Starred tabs, the fork's favorites. A starred tab is an upstream pinned tab
-//! wearing a star: it sits in the block at the top of the tab list, and bulk
-//! closes leave it open.
+//! The floating block at the top of the tab list, which the fork's emoji tags
+//! ride on (see `tab_tags`). With the "Float tagged tabs to the top" setting
+//! on, an ungrouped tab floats while it wears emoji: it's an upstream pinned
+//! tab, so it sits in the block and bulk closes leave it open. A starred tab
+//! group floats the same way and wears ⭐.
 //!
-//! The star has one look wherever it appears: a solid star in the ink of the
-//! title it leads, sized to that title, taking no clicks of its own.
+//! The flag and the names here keep the word "starred" from before tags, when
+//! the one mark a floating tab could wear was a star.
 
 use warp_core::ui::theme::Fill;
 use warp_core::ui::Icon;
 use warpui::elements::{Align, ConstrainedBox, Element};
+use warpui::fonts::FamilyId;
 use warpui::{AppContext, EntityId, SingletonEntity, ViewContext};
 
+use super::tab_tags::{render_tags, TabTags, TITLE_TAG_SIZE};
 use super::Workspace;
 use crate::features::FeatureFlag;
 use crate::tab::{bulk_close_label, uses_vertical_tabs};
+use crate::workspace::tab_settings::TabSettings;
 use crate::workspace::WorkspaceRegistry;
 
-/// The star's box: about a 12 px title's cap height, plus the overshoot a
-/// pointed glyph needs to look as tall as the capitals beside it. The glyph is
-/// drawn so that a box centred on the title's line puts it on the capitals.
-pub(crate) const STAR_SIZE: f32 = 10.;
-
-/// The gap between the star and the title it leads, the same as the gap before
-/// the unread dot.
-pub(crate) const STAR_TITLE_GAP: f32 = 4.;
-
-/// What the star takes from the head of a row. A starred row's later lines are
-/// indented by it, so each line's text starts where the title's does.
-pub(crate) const STAR_SLOT_WIDTH: f32 = STAR_SIZE + STAR_TITLE_GAP;
-
-/// The star before a Panes-layout tab header's 10 px label: the title's star
-/// scaled with its text, as near 10/12 of it as whole pixels allow, so it spans
-/// the label's capitals as the title's star spans the title's.
-pub(crate) const HEADER_STAR_SIZE: f32 = 8.;
-
-/// The gap between a header's star and its label, the title's gap scaled the
-/// same way.
-pub(crate) const HEADER_STAR_TITLE_GAP: f32 = 3.;
-
-/// Whether stars are on: the pinned-tabs engine and the fork's star re-skin
-/// of it, both.
+/// Whether emoji tags are on: the pinned-tabs engine and the fork's tags on
+/// top of it, both.
 pub(crate) fn starred_tabs_enabled() -> bool {
     FeatureFlag::PinnedTabs.is_enabled() && FeatureFlag::StarredTabs.is_enabled()
 }
 
-/// The star, in `ink`, at the size that suits a 12 px title.
-pub(crate) fn render_star(ink: Fill) -> Box<dyn Element> {
-    render_star_sized(ink, STAR_SIZE)
+/// Whether tagged tabs float: tags are on, and so is the "Float tagged tabs to
+/// the top" setting.
+pub(crate) fn tagged_tabs_float(app: &AppContext) -> bool {
+    starred_tabs_enabled() && *TabSettings::as_ref(app).float_tagged_tabs
 }
 
-/// The star, in `ink`, in a `size` square. It's only a mark, with no hover
-/// state and no click of its own, so a click on it lands on the row like a
-/// click anywhere else and a stray one can never unstar a tab.
-pub(crate) fn render_star_sized(ink: Fill, size: f32) -> Box<dyn Element> {
-    ConstrainedBox::new(Icon::StarFilled.to_warpui_icon(ink).finish())
-        .with_width(size)
-        .with_height(size)
-        .finish()
-}
-
-/// What a starred tab or group wears in the horizontal tab bar, in the
-/// `slot_size` square upstream sizes for its pin: the star, centred at its own
-/// size, or upstream's pin when stars are off.
-pub(crate) fn render_pin_slot_mark(slot_size: f32, ink: Fill) -> Box<dyn Element> {
+/// What a starred tab group wears in the horizontal tab bar, in the
+/// `slot_size` square upstream sizes for its pin: ⭐, centred, or upstream's
+/// pin when tags are off. A tab wears its emoji before its title instead.
+pub(crate) fn render_pin_slot_mark(
+    slot_size: f32,
+    ink: Fill,
+    font_family: FamilyId,
+) -> Box<dyn Element> {
     let mark = if starred_tabs_enabled() {
-        Align::new(render_star(ink)).finish()
+        Align::new(render_tags(&TabTags::star(), TITLE_TAG_SIZE, font_family)).finish()
     } else {
         Icon::PinFilledDiagonal.to_warpui_icon(ink).finish()
     };
@@ -73,58 +51,9 @@ pub(crate) fn render_pin_slot_mark(slot_size: f32, ink: Fill) -> Box<dyn Element
         .finish()
 }
 
-/// What the head of a vertical tabs row wears for its tab's star.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) enum RowStar {
-    /// Nothing: the tab isn't starred, or its header wears the star.
-    #[default]
-    None,
-    /// The star, before the title.
-    Star,
-    /// The star's slot, left empty: the later rows of a tab whose first row
-    /// wears the star, so their titles line up under its title.
-    Inset,
-}
-
-impl RowStar {
-    /// Whether the row's lines start after the star's slot.
-    pub(super) fn is_indented(self) -> bool {
-        self != RowStar::None
-    }
-}
-
-/// What a vertical tabs row wears for its tab's star. A starred tab wears one
-/// star: on its header in the Panes layout when the panel draws one
-/// (`header_wears_star`, see [`header_shows_star`]), and otherwise on its
-/// first row, with its other rows inset so their titles line up. So a split
-/// tab drawn one row per pane still has one star. A member of a starred group
-/// isn't starred itself; its group header wears the star, as the group's one
-/// row.
-pub(super) fn row_star(
-    tab_is_starred: bool,
-    is_first_row_of_tab: bool,
-    header_wears_star: bool,
-) -> RowStar {
-    if !starred_tabs_enabled() || !tab_is_starred || header_wears_star {
-        RowStar::None
-    } else if is_first_row_of_tab {
-        RowStar::Star
-    } else {
-        RowStar::Inset
-    }
-}
-
-/// Whether a Panes-layout tab header wears its tab's star: stars are on, the
-/// tab is starred and the panel draws its header. The star belongs to the tab,
-/// and the header is the tab's own label, so it goes there rather than on any
-/// one pane's row.
-pub(super) fn header_shows_star(tab_is_starred: bool, header_is_drawn: bool) -> bool {
-    starred_tabs_enabled() && tab_is_starred && header_is_drawn
-}
-
 /// Whether upstream's pin overlay shows on a pinned row or group header. That's
 /// upstream's rule, which hides it while the hover controls show, except that
-/// stars replace it outright: it would sit over the unread dot.
+/// tags replace it outright: it would sit over the unread dot.
 pub(super) fn shows_pin_overlay(is_pinned: bool, hidden_by_hover: bool) -> bool {
     FeatureFlag::PinnedTabs.is_enabled()
         && !FeatureFlag::StarredTabs.is_enabled()
@@ -132,12 +61,12 @@ pub(super) fn shows_pin_overlay(is_pinned: bool, hidden_by_hover: bool) -> bool 
         && !hidden_by_hover
 }
 
-/// Where the vertical tabs panel draws the hairline under the starred tabs: the
-/// position, among `shown` (the indices of the tabs the panel shows, in list
-/// order, after any search), of the first tab past the starred block. Only when
-/// a starred tab shows above it, so there's no line when a search or the tabs
-/// themselves leave either side empty, and none with stars off, when the block
-/// is empty.
+/// Where the vertical tabs panel draws the hairline under the floating tabs:
+/// the position, among `shown` (the indices of the tabs the panel shows, in
+/// list order, after any search), of the first tab past the floating block.
+/// Only when a floating tab shows above it, so there's no line when a search
+/// or the tabs themselves leave either side empty, and none with tags off,
+/// when the block is empty.
 pub(super) fn starred_divider_position(
     shown: impl IntoIterator<Item = usize>,
     starred_boundary: usize,
@@ -160,25 +89,6 @@ fn with_active_workspace<T>(ctx: &AppContext, read: impl FnOnce(&Workspace) -> T
     Some(read(workspace.as_ref(ctx)))
 }
 
-/// The palette's words for ⌃⌘S on the active window's active tab, which follow
-/// the tab menu's: "unstar current tab" on a starred tab, and "(leaves group)"
-/// when starring pulls the tab out of its group. `None` keeps "Star current
-/// tab".
-pub(crate) fn active_tab_star_description(ctx: &AppContext) -> Option<String> {
-    with_active_workspace(ctx, star_description).flatten()
-}
-
-/// The words `active_tab_star_description` gives `workspace`'s active tab.
-pub(super) fn star_description(workspace: &Workspace) -> Option<String> {
-    let tab = workspace.tabs.get(workspace.active_tab_index)?;
-    let description = match (tab.pinned, tab.group_id.is_some()) {
-        (true, _) => "unstar current tab",
-        (false, true) => "star current tab (leaves group)",
-        (false, false) => return None,
-    };
-    Some(description.to_owned())
-}
-
 /// A bulk close the palette runs on the active tab.
 #[derive(Clone, Copy)]
 pub(crate) enum PaletteBulkClose {
@@ -190,7 +100,7 @@ pub(crate) enum PaletteBulkClose {
 }
 
 /// The palette's label for a bulk close on the active window's active tab:
-/// `label`, with "(keep starred)" exactly when the close would spare a starred
+/// `label`, with "(keep tagged)" exactly when the close would spare a floating
 /// tab, by the tab menu's own rule. `None` when there's no active workspace or
 /// the close would close nothing, which leaves the binding's own wording.
 pub(crate) fn active_tab_bulk_close_description(
@@ -226,31 +136,21 @@ pub(super) fn bulk_close_description(
 }
 
 impl Workspace {
-    /// Stars or unstars the tab that owns `pane_group_id`, through upstream's
-    /// pin, which moves it to the end of the starred block or just past it, and
-    /// saves. Resolving the tab by identity rather than index keeps a menu
-    /// opened before the tabs moved acting on the tab it was opened for. A no-op
-    /// without stars, when that tab has since closed, or when it already has the
-    /// requested state.
+    /// Floats or sinks the tab that owns `pane_group_id`, through upstream's
+    /// pin, which moves it to the end of the floating block or just past it.
+    /// Changing a tab's emoji calls it, to float the tab as its first goes on
+    /// and sink it as its last comes off. Resolving the tab by identity rather
+    /// than index keeps it acting on the right tab however the tabs have moved.
+    /// A no-op without tags, when that tab has since closed, or when it already
+    /// has the requested state.
     pub(super) fn set_tab_starred(
         &mut self,
         pane_group_id: EntityId,
         starred: bool,
         ctx: &mut ViewContext<Self>,
     ) {
-        if !starred_tabs_enabled() {
+        if !starred_tabs_enabled() || !self.float_tab(pane_group_id, starred, ctx) {
             return;
-        }
-        let Some(index) = self.tab_index_of(pane_group_id) else {
-            return;
-        };
-        if self.tabs[index].pinned == starred {
-            return;
-        }
-        if starred {
-            self.pin_tab(index, ctx);
-        } else {
-            self.unpin_tab(index, ctx);
         }
         // The tab moved; when the vertical tabs panel shows it, keep it in view
         // where it landed.
@@ -261,24 +161,91 @@ impl Workspace {
         }
     }
 
-    /// Stars the active tab, or unstars it if it's starred.
-    pub(super) fn toggle_active_tab_star(&mut self, ctx: &mut ViewContext<Self>) {
-        let Some(tab) = self.tabs.get(self.active_tab_index) else {
-            return;
+    /// Floats or sinks the tab that owns `pane_group_id` through upstream's
+    /// pin, which moves it. Returns whether it moved.
+    fn float_tab(
+        &mut self,
+        pane_group_id: EntityId,
+        float: bool,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        let Some(index) = self.tab_index_of(pane_group_id) else {
+            return false;
         };
-        let (pane_group_id, starred) = (tab.pane_group.id(), tab.pinned);
-        self.set_tab_starred(pane_group_id, !starred, ctx);
+        if self.tabs[index].pinned == float {
+            return false;
+        }
+        if float {
+            self.pin_tab(index, ctx);
+        } else {
+            self.unpin_tab(index, ctx);
+        }
+        true
+    }
+
+    /// Brings every tab's float into line with its emoji and the "Float tagged
+    /// tabs to the top" setting: with it on, an ungrouped tab floats exactly
+    /// when it wears emoji; with it off, none floats. A tab floating with no
+    /// emoji of its own, as one starred before tags existed does, first takes
+    /// its ⭐ as a real emoji, so sinking it loses nothing it wore. A group's
+    /// members go where their group goes, whatever they wear. Runs after a
+    /// restore, when the setting changes, and after every action that saves,
+    /// which covers a tagged tab leaving its group.
+    pub(super) fn sync_tag_floats(&mut self, ctx: &mut ViewContext<Self>) {
+        if !starred_tabs_enabled() {
+            return;
+        }
+        let float = tagged_tabs_float(ctx);
+        let ungrouped: Vec<EntityId> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.group_id.is_none())
+            .map(|tab| tab.pane_group.id())
+            .collect();
+        let mut changed = false;
+        for pane_group_id in &ungrouped {
+            let Some(index) = self.tab_index_of(*pane_group_id) else {
+                continue;
+            };
+            let tab = &mut self.tabs[index];
+            if tab.pinned && tab.tags.is_empty() {
+                tab.tags = TabTags::star();
+                changed = true;
+            }
+        }
+        let floats = |workspace: &Self, pane_group_id: EntityId| {
+            workspace
+                .tab_index_of(pane_group_id)
+                .is_some_and(|index| float && !workspace.tabs[index].tags.is_empty())
+        };
+        // Sink from the bottom of the block up, and float from the top of the
+        // list down. Each tab lands at the block's edge, just past the ones
+        // already moved, so the tabs on both sides keep their order.
+        for &pane_group_id in ungrouped.iter().rev() {
+            if !floats(self, pane_group_id) {
+                changed |= self.float_tab(pane_group_id, false, ctx);
+            }
+        }
+        for &pane_group_id in &ungrouped {
+            if floats(self, pane_group_id) {
+                changed |= self.float_tab(pane_group_id, true, ctx);
+            }
+        }
+        if changed {
+            ctx.dispatch_global_action("workspace:save_app", ());
+            ctx.notify();
+        }
     }
 
     /// The index of the open tab that owns `pane_group_id`.
-    fn tab_index_of(&self, pane_group_id: EntityId) -> Option<usize> {
+    pub(super) fn tab_index_of(&self, pane_group_id: EntityId) -> Option<usize> {
         self.tabs
             .iter()
             .position(|tab| tab.pane_group.id() == pane_group_id)
     }
 
-    /// How many tabs lead the list as starred, which the close menus promise
-    /// to spare. Zero when stars are off.
+    /// How many tabs lead the list as floating, which the close menus promise
+    /// to spare. Zero when tags are off.
     pub(super) fn starred_boundary(&self) -> usize {
         if starred_tabs_enabled() {
             self.pinned_boundary_index(&self.tabs)

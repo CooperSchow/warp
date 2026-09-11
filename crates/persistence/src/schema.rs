@@ -325,6 +325,13 @@ diesel::table! {
 }
 
 diesel::table! {
+    pane_tags (pane_uuid) {
+        pane_uuid -> Binary,
+        emojis -> Text,
+    }
+}
+
+diesel::table! {
     panels (id) {
         id -> Integer,
         tab_id -> Integer,

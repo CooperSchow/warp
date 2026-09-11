@@ -35,10 +35,10 @@ use warpui::ui_components::components::{UiComponent, UiComponentStyles};
 use warpui::ui_components::text_input::TextInput;
 use warpui::{AppContext, EntityId, SingletonEntity, ViewHandle, WindowId};
 
-use super::starred_tabs::{
-    header_shows_star, render_star, render_star_sized, row_star, shows_pin_overlay,
-    starred_divider_position, RowStar, HEADER_STAR_SIZE, HEADER_STAR_TITLE_GAP, STAR_SLOT_WIDTH,
-    STAR_TITLE_GAP,
+use super::starred_tabs::{shows_pin_overlay, starred_divider_position, starred_tabs_enabled};
+use super::tab_tags::{
+    header_shows_tags, row_tags, title_with_tags, worn_tags, TabTags, HEADER_TAG_SIZE,
+    TITLE_TAG_SIZE,
 };
 use super::tab_unread::{render_unread_dot, row_shows_unread, tab_is_unread, unread_dot_ink};
 use super::{render_group_member_icon_collage, select_unique_pane_kinds};
@@ -295,6 +295,7 @@ fn render_pane_icon_with_status(
 struct PaneGroupStateHandles {
     group: MouseStateHandle,
     header: MouseStateHandle,
+    emoji: MouseStateHandle,
     kebab: MouseStateHandle,
     close: MouseStateHandle,
     action_buttons: MouseStateHandle,
@@ -417,7 +418,7 @@ fn render_pane_row_element(
         is_pinned,
         container_is_hovered,
         row_unread: _,
-        star: _,
+        tags: _,
     } = props;
     let is_selected = is_active_tab && is_focused;
     let show_pin = shows_pin_overlay(is_pinned, container_is_hovered);
@@ -897,10 +898,10 @@ struct PaneProps<'a> {
     container_is_hovered: bool,
     /// Whether this row shows the unread dot (see `tab_unread::row_shows_unread`).
     row_unread: bool,
-    /// What this row wears for its tab's star (see `starred_tabs::row_star`).
-    /// Nothing until the renderer, which knows where the row falls in its tab
-    /// and whether the tab's header wears the star, sets it.
-    star: RowStar,
+    /// The emoji this row wears before its title (see `tab_tags::row_tags`).
+    /// None until the renderer, which knows where the row falls in its tab
+    /// and whether the tab's header wears them, sets them.
+    tags: TabTags,
 }
 
 struct PaneRowState {
@@ -1021,8 +1022,8 @@ struct GroupHeaderProps<'a> {
     is_being_renamed: bool,
     rename_editor: ViewHandle<EditorView>,
     header_mouse_state: MouseStateHandle,
-    /// Whether the header wears its tab's star (see `starred_tabs::header_shows_star`).
-    wears_star: bool,
+    /// The emoji the header wears (see `tab_tags::header_shows_tags`).
+    tags: TabTags,
 }
 
 #[derive(Clone, Copy)]
@@ -2163,6 +2164,7 @@ fn render_tab_group_internal(
     let PaneGroupStateHandles {
         group: group_mouse_state,
         header: group_header_mouse_state,
+        emoji: emoji_mouse_state,
         kebab: kebab_mouse_state,
         close: close_mouse_state,
         action_buttons: action_buttons_mouse_state,
@@ -2249,10 +2251,10 @@ fn render_tab_group_internal(
 
     let show_header =
         should_show_tab_group_header(has_custom_title, is_being_renamed, visible_pane_ids.len());
-    // In the Panes layout a starred tab's header, its own label, wears its
-    // star, and its pane rows wear none.
-    let header_wears_star =
-        uses_outer_group_container && header_shows_star(tab.pinned, show_header);
+    // In the Panes layout a tagged tab's header, its own label, wears its
+    // emoji, and its pane rows wear none.
+    let worn = worn_tags(&tab.tags, tab.pinned);
+    let header_wears_tags = uses_outer_group_container && header_shows_tags(&worn, show_header);
     let mut group_element = Hoverable::new(group_mouse_state, move |group_state| {
         // GroupedTabs: stack panes flush in Panes view.
         let stack_panes_flush = FeatureFlag::GroupedTabs.is_enabled()
@@ -2325,7 +2327,7 @@ fn render_tab_group_internal(
                     return Empty::new().finish();
                 };
                 // A Summary card is its tab's one row.
-                pane_props.star = row_star(tab.pinned, true, false);
+                pane_props.tags = worn.clone();
                 rows.add_child(render_summary_tab_item(
                     pane_props,
                     summary
@@ -2391,7 +2393,7 @@ fn render_tab_group_internal(
                         is_last: row_idx + 1 == total_rows,
                     };
                 }
-                pane_props.star = row_star(tab.pinned, row_idx == 0, header_wears_star);
+                pane_props.tags = row_tags(&worn, row_idx == 0, header_wears_tags);
                 let view_mode = *TabSettings::as_ref(app).vertical_tabs_view_mode.value();
                 let row = match view_mode {
                     VerticalTabsViewMode::Compact => render_compact_pane_row(pane_props, app),
@@ -2414,7 +2416,11 @@ fn render_tab_group_internal(
                         is_being_renamed,
                         rename_editor: rename_editor.clone(),
                         header_mouse_state: group_header_mouse_state.clone(),
-                        wears_star: header_wears_star,
+                        tags: if header_wears_tags {
+                            worn.clone()
+                        } else {
+                            TabTags::default()
+                        },
                     },
                     app,
                 ));
@@ -2495,13 +2501,25 @@ fn render_tab_group_internal(
         // are hovered, following the pattern from AgentManagementView.
         // This prevents flickering when the mouse moves from the group
         // to the overlay buttons (which may sit outside the group bounds).
+        // The emoji picker, like the menu, keeps the buttons up while it's open.
+        let is_emoji_picker_open_for_tab = workspace
+            .tab_emoji_picker_target
+            .is_some_and(|target| target.pane_group_id == pane_group_id);
         let should_show_action_buttons = !drag_state.is_any_pane_dragging
-            && (group_state.is_hovered() || action_buttons_mouse_over || is_menu_open_for_tab);
+            && (group_state.is_hovered()
+                || action_buttons_mouse_over
+                || is_menu_open_for_tab
+                || is_emoji_picker_open_for_tab);
 
         let action_buttons = if should_show_action_buttons {
             render_group_action_buttons(
                 tab_index,
                 is_menu_open_for_tab,
+                starred_tabs_enabled().then(|| EmojiButton {
+                    pane_group_id,
+                    mouse_state: emoji_mouse_state.clone(),
+                    is_picker_open: is_emoji_picker_open_for_tab,
+                }),
                 action_buttons_mouse_state.clone(),
                 kebab_mouse_state.clone(),
                 close_mouse_state.clone(),
@@ -2676,15 +2694,52 @@ fn render_tab_group_internal(
     }
 }
 
+/// The add-emoji button in a tab's hover controls, for the tab that owns
+/// `pane_group_id`. It stays lit while its picker is open, as the kebab does
+/// while its menu is.
+struct EmojiButton {
+    pane_group_id: EntityId,
+    mouse_state: MouseStateHandle,
+    is_picker_open: bool,
+}
+
 fn render_group_action_buttons(
     tab_index: usize,
     is_menu_open: bool,
+    emoji_button: Option<EmojiButton>,
     action_buttons_mouse_state: MouseStateHandle,
     kebab_mouse_state: MouseStateHandle,
     close_mouse_state: MouseStateHandle,
     theme: &WarpTheme,
 ) -> Box<dyn Element> {
     let meta_color = theme.sub_text_color(theme.background());
+
+    let emoji_button = emoji_button.map(|button| {
+        let EmojiButton {
+            pane_group_id,
+            mouse_state,
+            is_picker_open,
+        } = button;
+        Hoverable::new(mouse_state, move |button_state| {
+            let mut container = Container::new(
+                ConstrainedBox::new(WarpIcon::FaceSmilePlus.to_warpui_icon(meta_color).finish())
+                    .with_width(GROUP_ACTION_BUTTON_ICON_SIZE)
+                    .with_height(GROUP_ACTION_BUTTON_ICON_SIZE)
+                    .finish(),
+            )
+            .with_padding(Padding::uniform(GROUP_ACTION_BUTTON_PADDING))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
+            if is_picker_open || button_state.is_hovered() {
+                container = container.with_background(internal_colors::fg_overlay_2(theme));
+            }
+            container.finish()
+        })
+        .with_cursor(Cursor::PointingHand)
+        .on_mouse_down(move |ctx, _, _| {
+            ctx.dispatch_typed_action(WorkspaceAction::ToggleTabEmojiPicker { pane_group_id });
+        })
+        .finish()
+    });
 
     let kebab_button = Hoverable::new(kebab_mouse_state, move |button_state| {
         let mut container = Container::new(
@@ -2729,10 +2784,14 @@ fn render_group_action_buttons(
     })
     .finish();
 
-    let button_row = Flex::row()
+    let mut button_row = Flex::row()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
-        .with_spacing(GROUP_ACTION_BUTTON_GAP)
+        .with_spacing(GROUP_ACTION_BUTTON_GAP);
+    if let Some(emoji_button) = emoji_button {
+        button_row.add_child(emoji_button);
+    }
+    let button_row = button_row
         .with_child(kebab_button)
         .with_child(close_button)
         .finish();
@@ -2835,6 +2894,7 @@ fn render_grouped_tabs_header(
     is_being_renamed: bool,
     rename_editor: Option<&ViewHandle<EditorView>>,
     collapsed_member_kinds: Option<&[SummaryPaneKind]>,
+    has_unread_member: bool,
     app: &AppContext,
 ) -> Box<dyn Element> {
     let appearance = Appearance::as_ref(app);
@@ -2895,14 +2955,41 @@ fn render_grouped_tabs_header(
         .with_clip(ClipConfig::ellipsis())
         .with_color(sub_text_color.into())
         .finish();
-    // A starred group's header is the group's one row, so it wears the star.
-    let star = row_star(group.pinned, true, false);
+    // A starred group's header is the group's one row, so it wears ⭐.
+    let group_tags = if group.pinned && starred_tabs_enabled() {
+        TabTags::star()
+    } else {
+        TabTags::default()
+    };
+    let title_line = title_with_tags(title_element, &group_tags, TITLE_TAG_SIZE, font_family);
+    // A group with an unread tab in it shows the tab's dot, so a collapsed
+    // group doesn't hide a finished session; in the title's ink when the
+    // header is drawn selected, as a selected row's dot is.
+    let title_line = if has_unread_member {
+        Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(Shrinkable::new(1., title_line).finish())
+            .with_child(
+                Container::new(render_unread_dot(unread_dot_ink(
+                    theme.accent(),
+                    main_text_color,
+                    is_header_selected,
+                )))
+                .with_margin_left(4.)
+                .finish(),
+            )
+            .finish()
+    } else {
+        title_line
+    };
     let text_column: Box<dyn Element> = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Start)
         .with_spacing(1.)
-        .with_child(title_with_star(title_element, star, theme))
-        .with_child(under_star(subtitle, star))
+        .with_child(title_line)
+        .with_child(subtitle)
         .finish();
 
     let action_buttons = if show_action_buttons {
@@ -3104,6 +3191,12 @@ fn render_grouped_tab_container(
         // rendered then, so this skips the per-tab pane walk when expanded.
         let collapsed_member_kinds =
             is_collapsed.then(|| workspace.compute_group_member_kinds(group.id, app));
+        let has_unread_member = members.iter().any(|(tab_index, _)| {
+            workspace
+                .tabs
+                .get(*tab_index)
+                .is_some_and(|tab| tab_is_unread(tab.pane_group.as_ref(app), app))
+        });
         let header = render_grouped_tabs_header(
             &group,
             member_count,
@@ -3114,6 +3207,7 @@ fn render_grouped_tab_container(
             is_being_renamed,
             rename_editor.as_ref(),
             collapsed_member_kinds.as_deref(),
+            has_unread_member,
             app,
         );
         // While a pane is being dragged, the group header is a drop zone for the
@@ -3331,7 +3425,7 @@ fn render_group_header(props: GroupHeaderProps<'_>, app: &AppContext) -> Box<dyn
         is_being_renamed,
         rename_editor,
         header_mouse_state,
-        wears_star,
+        tags,
     } = props;
     let appearance = Appearance::as_ref(app);
     let theme = appearance.theme();
@@ -3361,7 +3455,7 @@ fn render_group_header(props: GroupHeaderProps<'_>, app: &AppContext) -> Box<dyn
                 .with_color(title_color.into())
                 .finish()
         };
-        Container::new(header_label_with_star(label, wears_star, title_color))
+        Container::new(title_with_tags(label, &tags, HEADER_TAG_SIZE, font_family))
             .with_padding(
                 Padding::uniform(0.)
                     .with_left(GROUP_HORIZONTAL_PADDING)
@@ -3482,68 +3576,6 @@ fn render_title_indicator(theme: &WarpTheme, props: &PaneProps<'_>) -> Box<dyn E
     ))
 }
 
-/// Line 1 of a row, with what it wears for its tab's star (see
-/// `starred_tabs::row_star`): the star in the title's ink and then the title,
-/// which keeps its own clipping in the width left; or the star's slot, left
-/// empty, so the title lines up under the first title of a tab whose first row
-/// wears the star. The star's box is centred on the title's line, which its
-/// glyph is drawn to sit on. Any other row's line 1 is the title alone,
-/// untouched.
-fn title_with_star(title: Box<dyn Element>, star: RowStar, theme: &WarpTheme) -> Box<dyn Element> {
-    match star {
-        RowStar::None => title,
-        RowStar::Inset => Container::new(title)
-            .with_margin_left(STAR_SLOT_WIDTH)
-            .finish(),
-        RowStar::Star => Flex::row()
-            .with_main_axis_size(MainAxisSize::Min)
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_child(
-                Container::new(render_star(theme.main_text_color(theme.background())))
-                    .with_margin_right(STAR_TITLE_GAP)
-                    .finish(),
-            )
-            .with_child(Shrinkable::new(1., title).finish())
-            .finish(),
-    }
-}
-
-/// A later line of a row that wears its tab's star or the star's slot,
-/// indented by the slot so its text starts where the title's does rather than
-/// under the star. Any other row's lines are untouched.
-fn under_star(line: Box<dyn Element>, star: RowStar) -> Box<dyn Element> {
-    if star.is_indented() {
-        Container::new(line)
-            .with_margin_left(STAR_SLOT_WIDTH)
-            .finish()
-    } else {
-        line
-    }
-}
-
-/// A Panes-layout tab header's label, led by its tab's star when the header
-/// wears it: the star sized for the header's 10 px text and in the label's
-/// ink, its box centred on the label's line as a row's star is on its title.
-fn header_label_with_star(
-    label: Box<dyn Element>,
-    wears_star: bool,
-    ink: WarpThemeFill,
-) -> Box<dyn Element> {
-    if !wears_star {
-        return label;
-    }
-    Flex::row()
-        .with_main_axis_size(MainAxisSize::Min)
-        .with_cross_axis_alignment(CrossAxisAlignment::Center)
-        .with_child(
-            Container::new(render_star_sized(ink, HEADER_STAR_SIZE))
-                .with_margin_right(HEADER_STAR_TITLE_GAP)
-                .finish(),
-        )
-        .with_child(Shrinkable::new(1., label).finish())
-        .finish()
-}
-
 /// Space above and below the starred block's hairline in the card layouts, on
 /// top of the list's own 4 px spacing: a 13 px break, against 4 px between rows.
 const STARRED_DIVIDER_MARGIN: f32 = 2.;
@@ -3610,7 +3642,7 @@ fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
         title_row.add_child(
             Shrinkable::new(
                 1.,
-                title_with_star(
+                title_with_tags(
                     render_pane_title_slot(
                         &props,
                         || {
@@ -3625,8 +3657,9 @@ fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
                         appearance,
                         app,
                     ),
-                    props.star,
-                    theme,
+                    &props.tags,
+                    TITLE_TAG_SIZE,
+                    font_family,
                 ),
             )
             .finish(),
@@ -3651,13 +3684,12 @@ fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
             } else {
                 ClipConfig::ellipsis()
             };
-            content_col.add_child(under_star(
+            content_col.add_child(
                 Text::new_inline(effective_subtitle, font_family, 12.)
                     .with_clip(subtitle_clip)
                     .with_color(theme.sub_text_color(theme.background()).into())
                     .finish(),
-                props.star,
-            ));
+            );
         }
 
         content_col.finish()
@@ -4036,7 +4068,7 @@ impl<'a> PaneProps<'a> {
             is_pinned,
             container_is_hovered,
             row_unread: row_shows_unread(pane_group, pane_id, display_granularity, app),
-            star: RowStar::None,
+            tags: TabTags::default(),
         })
     }
 
@@ -4590,7 +4622,12 @@ fn render_terminal_row_content(
         }
     };
 
-    let first_line = title_with_star(first_line, props.star, theme);
+    let first_line = title_with_tags(
+        first_line,
+        &props.tags,
+        TITLE_TAG_SIZE,
+        appearance.ui_font_family(),
+    );
     let first_line_element = if props.row_unread {
         Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
@@ -4611,11 +4648,8 @@ fn render_terminal_row_content(
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Start);
     content.add_child(first_line_element);
-    content.add_child(under_star(
-        Container::new(second_line).with_margin_top(2.).finish(),
-        props.star,
-    ));
-    content.add_child(under_star(
+    content.add_child(Container::new(second_line).with_margin_top(2.).finish());
+    content.add_child(
         Container::new(render_terminal_metadata_line(
             terminal_view,
             props.pane_group_id,
@@ -4628,8 +4662,7 @@ fn render_terminal_row_content(
         ))
         .with_margin_top(2.)
         .finish(),
-        props.star,
-    ));
+    );
     content.finish()
 }
 
@@ -4833,9 +4866,8 @@ fn render_summary_tab_item(
     let mut title_region = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Start);
-    // A starred tab's card leads its first line with the star, and indents every
-    // line after it to line up with that line's text.
-    let star = props.star;
+    // A tagged tab's card leads its first line with the tab's emoji.
+    let tags_font = appearance.ui_font_family();
     if let Some(title_override) = render_title_override(
         &props,
         12.,
@@ -4844,12 +4876,18 @@ fn render_summary_tab_item(
         appearance,
         app,
     ) {
-        title_region.add_child(title_with_star(title_override, star, theme));
+        title_region.add_child(title_with_tags(
+            title_override,
+            &props.tags,
+            TITLE_TAG_SIZE,
+            tags_font,
+        ));
     } else if summary.primary_labels.is_empty() {
-        title_region.add_child(title_with_star(
+        title_region.add_child(title_with_tags(
             render_text_line(&props.title, main_text_color, ClipConfig::end(), appearance),
-            star,
-            theme,
+            &props.tags,
+            TITLE_TAG_SIZE,
+            tags_font,
         ));
     } else {
         let visible_labels: Vec<&VerticalTabsSummaryPrimaryLabel> = summary
@@ -4867,21 +4905,18 @@ fn render_summary_tab_item(
                 appearance,
             );
             title_region.add_child(if idx == 0 {
-                title_with_star(line, star, theme)
+                title_with_tags(line, &props.tags, TITLE_TAG_SIZE, tags_font)
             } else {
-                under_star(
-                    Container::new(line)
-                        .with_margin_top(INTRA_REGION_GAP)
-                        .finish(),
-                    star,
-                )
+                Container::new(line)
+                    .with_margin_top(INTRA_REGION_GAP)
+                    .finish()
             });
         }
 
         let hidden_label_count =
             summary_overflow_count(summary.primary_labels.len(), MAX_VISIBLE_PRIMARY_LABELS);
         if hidden_label_count > 0 {
-            title_region.add_child(under_star(
+            title_region.add_child(
                 Container::new(render_summary_overflow_line(
                     hidden_label_count,
                     sub_text_color,
@@ -4889,8 +4924,7 @@ fn render_summary_tab_item(
                 ))
                 .with_margin_top(INTRA_REGION_GAP)
                 .finish(),
-                star,
-            ));
+            );
         }
     }
     let title_region = title_region.finish();
@@ -4928,7 +4962,7 @@ fn render_summary_tab_item(
         } else {
             INTRA_REGION_GAP
         };
-        text_col.add_child(under_star(
+        text_col.add_child(
             Container::new(render_text_line(
                 working_dir,
                 sub_text_color,
@@ -4937,8 +4971,7 @@ fn render_summary_tab_item(
             ))
             .with_margin_top(margin)
             .finish(),
-            star,
-        ));
+        );
     }
     let hidden_directory_count = summary_overflow_count(
         summary.working_directories.len(),
@@ -4950,7 +4983,7 @@ fn render_summary_tab_item(
         } else {
             INTRA_REGION_GAP
         };
-        text_col.add_child(under_star(
+        text_col.add_child(
             Container::new(render_summary_overflow_line(
                 hidden_directory_count,
                 sub_text_color,
@@ -4958,8 +4991,7 @@ fn render_summary_tab_item(
             ))
             .with_margin_top(margin)
             .finish(),
-            star,
-        ));
+        );
     }
 
     // Branch region. Each branch line gets the existing 4px top margin from APP-3875.
@@ -4970,7 +5002,7 @@ fn render_summary_tab_item(
         .take(MAX_VISIBLE_BRANCH_LINES)
         .enumerate()
     {
-        text_col.add_child(under_star(
+        text_col.add_child(
             Container::new(render_summary_branch_line(
                 branch_entry,
                 pr_badge_mouse_states.get(idx).cloned(),
@@ -4979,14 +5011,13 @@ fn render_summary_tab_item(
             ))
             .with_margin_top(REGION_GAP)
             .finish(),
-            star,
-        ));
+        );
     }
 
     let hidden_branch_count =
         summary_overflow_count(summary.branch_entries.len(), MAX_VISIBLE_BRANCH_LINES);
     if hidden_branch_count > 0 {
-        text_col.add_child(under_star(
+        text_col.add_child(
             Container::new(render_summary_overflow_line(
                 hidden_branch_count,
                 sub_text_color,
@@ -4994,8 +5025,7 @@ fn render_summary_tab_item(
             ))
             .with_margin_top(REGION_GAP)
             .finish(),
-            star,
-        ));
+        );
     }
 
     let content = Flex::row()
@@ -7483,8 +7513,7 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
             };
             (title, subtitle)
         };
-    let title_element = title_with_star(title_element, props.star, theme);
-    let subtitle_element = subtitle_element.map(|subtitle| under_star(subtitle, props.star));
+    let title_element = title_with_tags(title_element, &props.tags, TITLE_TAG_SIZE, font_family);
 
     // Title row with optional indicator
     let title_row = if has_indicator {

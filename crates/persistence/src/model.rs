@@ -15,9 +15,10 @@ use super::schema::{
     generic_string_objects, ignored_suggestions, mcp_environment_variables,
     mcp_server_installations, mcp_server_panes, notebook_panes, notebooks, object_actions,
     object_metadata, object_permissions, pane_branches, pane_leaves, pane_marks, pane_nodes,
-    panels, project_rules, projects, server_experiments, settings_panes, tab_groups, tabs,
-    team_members, team_settings, teams, terminal_panes, user_profiles, windows, workflow_panes,
-    workflows, workspace_language_server, workspace_metadata, workspace_teams, workspaces,
+    pane_tags, panels, project_rules, projects, server_experiments, settings_panes, tab_groups,
+    tabs, team_members, team_settings, teams, terminal_panes, user_profiles, windows,
+    workflow_panes, workflows, workspace_language_server, workspace_metadata, workspace_teams,
+    workspaces,
 };
 
 #[derive(Insertable)]
@@ -628,6 +629,21 @@ pub struct NewPaneMark {
     pub pane_uuid: Vec<u8>,
     pub starred: bool,
     pub marked_unread: bool,
+}
+
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = pane_tags)]
+pub struct PaneTag {
+    pub pane_uuid: Vec<u8>,
+    /// A JSON array of the tab's emoji.
+    pub emojis: String,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = pane_tags)]
+pub struct NewPaneTag {
+    pub pane_uuid: Vec<u8>,
+    pub emojis: String,
 }
 
 #[derive(Insertable)]

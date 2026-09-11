@@ -180,6 +180,8 @@ reqwest.workspace = true
 rust-embed.workspace = true
 sentry-log = { workspace = true, optional = true }
 inventory = "0.3"
+# The tab emoji picker's catalog: every emoji with its name, shortcodes and group.
+emojis = "0.9.0"
 schemars = "1"
 serde.workspace = true
 serde_bytes.workspace = true

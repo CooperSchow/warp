@@ -302,6 +302,7 @@ fn transferred_tab_workspace(
                 is_right_panel_maximized: false,
                 is_tab_drag_preview: false,
                 pinned: false,
+                tags: Vec::new(),
             },
             ctx,
         )
@@ -5015,15 +5016,13 @@ fn every_label_the_tab_menus_can_show_fits_the_width_they_open_at() {
         // The sweep reached the longest labels either tab bar can show.
         let has_label =
             |vertical: bool, label: &str| labels[&vertical].iter().any(|(text, _)| text == label);
-        assert!(has_label(true, "Close Tabs Below (keep starred)"));
-        assert!(has_label(true, "Close tabs above (keep starred)"));
-        assert!(has_label(true, "Close tabs below (keep starred)"));
-        assert!(has_label(false, "Close Tabs to the Right (keep starred)"));
-        assert!(has_label(false, "Close tabs to the right (keep starred)"));
-        assert!(has_label(false, "Close tabs to the left (keep starred)"));
-        assert!(labels[&true]
-            .iter()
-            .any(|(text, hint)| text == "Star tab (leaves group)" && hint.is_some()));
+        assert!(has_label(true, "Close Tabs Below (keep tagged)"));
+        assert!(has_label(true, "Close tabs above (keep tagged)"));
+        assert!(has_label(true, "Close tabs below (keep tagged)"));
+        assert!(has_label(false, "Close Tabs to the Right (keep tagged)"));
+        assert!(has_label(false, "Close tabs to the right (keep tagged)"));
+        assert!(has_label(false, "Close tabs to the left (keep tagged)"));
+        assert!(has_label(true, "Edit emoji…"));
 
         let font_size = app.update(|ctx| Appearance::as_ref(ctx).ui_builder().ui_font_size());
         let mut font_db = warpui::platform::mac::FontDB::new();

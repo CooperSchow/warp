@@ -17,7 +17,9 @@ pub(crate) mod orchestration_launch_modal;
 pub(crate) mod right_panel;
 pub(crate) mod starred_tabs;
 mod startup_directory;
+mod tab_emoji_picker;
 mod tab_grouping;
+pub(crate) mod tab_tags;
 pub(crate) mod tab_unread;
 #[cfg(test)]
 #[path = "view_tests.rs"]
@@ -637,7 +639,6 @@ pub(crate) const JUMP_TO_LATEST_TOAST_BINDING_NAME: &str = "workspace:jump_to_la
 pub(crate) const TOGGLE_NOTIFICATION_MAILBOX_BINDING_NAME: &str =
     "workspace:toggle_notification_mailbox";
 pub(crate) const TOGGLE_ACTIVE_TAB_UNREAD_BINDING_NAME: &str = "workspace:toggle_active_tab_unread";
-pub(crate) const TOGGLE_ACTIVE_TAB_STAR_BINDING_NAME: &str = "workspace:toggle_active_tab_star";
 pub(crate) const JUMP_TO_NEXT_UNREAD_TAB_BINDING_NAME: &str = "workspace:jump_to_next_unread_tab";
 
 // these won't have to be public after we deprecate the code mode v1 project explorer which is defined in terminal
@@ -984,9 +985,11 @@ pub struct TransferredTab {
     pub right_panel_open: bool,
     pub is_right_panel_maximized: bool,
     pub draggable_state: DraggableState,
-    /// Whether the tab is starred. With stars on, it keeps its star wherever
-    /// it goes; with them off it arrives unpinned, as upstream's tab does.
+    /// Whether the tab floats. With tags on, it keeps floating wherever it
+    /// goes; with them off it arrives unpinned, as upstream's tab does.
     pub pinned: bool,
+    /// The emoji the tab wears, which go with it.
+    pub tags: Vec<String>,
 }
 #[cfg(not(target_family = "wasm"))]
 struct ThirdPartyLocalContinuationLaunch {
@@ -1050,6 +1053,10 @@ pub struct Workspace {
     show_tab_group_right_click_menu: Option<(TabGroupId, TabContextMenuAnchor)>,
     /// Open multi-tab selection menu (right-click on any tab in a multi-tab selection).
     show_tab_selection_right_click_menu: Option<(usize, TabContextMenuAnchor)>,
+    /// The picker for a tab's emoji tags (see `tab_emoji_picker`).
+    tab_emoji_picker: ViewHandle<tab_emoji_picker::TabEmojiPicker>,
+    /// The tab the emoji picker is open for, and where.
+    tab_emoji_picker_target: Option<tab_emoji_picker::TabEmojiPickerTarget>,
     // TODO(CORE-2300): this used to be add_tab_dropdown_menu.
     // Because we are rolling out the change behind a feature flag,
     // keep this comment here until the feature flag is removed.
@@ -2879,6 +2886,10 @@ impl Workspace {
             new_session_sidecar_menu,
             move_to_group_sidecar_menu,
         ) = Self::build_menus(ctx);
+        let tab_emoji_picker = ctx.add_typed_action_view(tab_emoji_picker::TabEmojiPicker::new);
+        ctx.subscribe_to_view(&tab_emoji_picker, move |me, _, event, ctx| {
+            me.handle_tab_emoji_picker_event(event, ctx);
+        });
 
         // Subscribe to network changes
         ctx.subscribe_to_model(
@@ -3414,6 +3425,8 @@ impl Workspace {
             show_tab_right_click_menu: None,
             show_tab_group_right_click_menu: None,
             show_tab_selection_right_click_menu: None,
+            tab_emoji_picker,
+            tab_emoji_picker_target: None,
             new_session_dropdown_menu,
             show_new_session_dropdown_menu: None,
             changelog_model,
@@ -4012,6 +4025,11 @@ impl Workspace {
             | TabSettingsChangedEvent::ClaudeAutoColorRules { .. } => {
                 ctx.notify();
             }
+            TabSettingsChangedEvent::FloatTaggedTabs { .. } => {
+                // Tagged tabs float up, or settle where they are, at once.
+                self.sync_tag_floats(ctx);
+                ctx.notify();
+            }
             TabSettingsChangedEvent::ClaudeAutoTabColors { .. } => {
                 // Claude auto-coloring and directory-based coloring are
                 // mutually exclusive; re-sync so directory colors clear when
@@ -4147,6 +4165,10 @@ impl Workspace {
                         if FeatureFlag::PinnedTabs.is_enabled() {
                             self.tabs[tab_index].pinned = saved_tab.pinned;
                         }
+                        if starred_tabs::starred_tabs_enabled() {
+                            self.tabs[tab_index].tags =
+                                tab_tags::TabTags::from_stored(saved_tab.tags.clone());
+                        }
                         // Drop the group reference if the group itself didn't restore.
                         self.tabs[tab_index].group_id = saved_tab
                             .group_id
@@ -4188,6 +4210,8 @@ impl Workspace {
 
                 self.activate_tab_internal(active_tab_index, ctx);
                 self.commit_restored_unread_marks(ctx);
+                // Tagged tabs float, or not, as the setting says now.
+                self.sync_tag_floats(ctx);
                 self.check_and_trigger_onboarding(ctx);
             }
             NewWorkspaceSource::FromTemplate { window_template } => {
@@ -4253,6 +4277,7 @@ impl Workspace {
                 is_right_panel_maximized,
                 is_tab_drag_preview,
                 pinned,
+                tags,
                 ..
             } => {
                 self.set_is_tab_drag_preview(is_tab_drag_preview);
@@ -4265,7 +4290,7 @@ impl Workspace {
                 if let (Some(color), Some(tab)) = (tab_color, self.tabs.last_mut()) {
                     tab.selected_color = SelectedTabColor::Color(color);
                 }
-                self.keep_transferred_star(pinned);
+                self.keep_transferred_marks(pinned, tags);
                 if self.left_panel_visibility_across_tabs_enabled(ctx) {
                     self.left_panel_open = left_panel_open;
                 }
@@ -4284,6 +4309,7 @@ impl Workspace {
                 left_panel_open,
                 is_tab_drag_preview,
                 pinned,
+                tags,
                 ..
             } => {
                 self.set_is_tab_drag_preview(is_tab_drag_preview);
@@ -4296,7 +4322,7 @@ impl Workspace {
                 if let (Some(color), Some(tab)) = (tab_color, self.tabs.last_mut()) {
                     tab.selected_color = SelectedTabColor::Color(color);
                 }
-                self.keep_transferred_star(pinned);
+                self.keep_transferred_marks(pinned, tags);
                 if self.left_panel_visibility_across_tabs_enabled(ctx) {
                     self.left_panel_open = left_panel_open;
                 }
@@ -7904,21 +7930,22 @@ impl Workspace {
             == 1
     }
 
-    /// The tab menu's width in the vertical tabs panel with stars on: just
-    /// enough for the widest label it can show, "Close Tabs Below (keep
-    /// starred)", 171.8 px in the menu's 12 px Roboto, plus the items' 14 px
-    /// padding on each side. The group menu's widest, "Close tabs above (keep
-    /// starred)", is narrower.
+    /// The tab menu's width in the vertical tabs panel with tags on: enough
+    /// for the widest label it can show, "Close Tabs Below (keep tagged)",
+    /// plus the items' 14 px padding on each side. It was sized for the
+    /// longer "(keep starred)" of 171.8 px in the menu's 12 px Roboto, so
+    /// there's a little room to spare. The group menu's widest, "Close tabs
+    /// above (keep tagged)", is narrower.
     const STARRED_TAB_MENU_WIDTH_VERTICAL: f32 = 200.;
 
     /// The same in the horizontal tab bar, whose widest label is "Close Tabs to
-    /// the Right (keep starred)", 200.2 px.
+    /// the Right (keep tagged)"; sized, as above, for "(keep starred)".
     const STARRED_TAB_MENU_WIDTH_HORIZONTAL: f32 = 229.;
 
     /// How wide the tab menu and the tab-group menu open. Upstream's width cut
-    /// the fork's "(keep starred)" labels off mid-word, so with stars on both
-    /// open just wide enough for the widest label either can show in this tab
-    /// bar. With stars off they keep upstream's width.
+    /// the fork's "(keep …)" labels off mid-word, so with tags on both open
+    /// wide enough for the widest label either can show in this tab bar. With
+    /// tags off they keep upstream's width.
     fn tab_menu_width(stars_on: bool, vertical: bool) -> f32 {
         match (stars_on, vertical) {
             (false, _) => crate::menu::DEFAULT_WIDTH,
@@ -11778,6 +11805,14 @@ impl Workspace {
                     // enabled.
                     pinned: FeatureFlag::PinnedTabs.is_enabled()
                         && self.tabs.get(tab_index).is_some_and(|tab| tab.pinned),
+                    tags: if starred_tabs::starred_tabs_enabled() {
+                        self.tabs
+                            .get(tab_index)
+                            .map(|tab| tab.tags.to_vec())
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    },
                 }
             })
             .filter(|tab| {
@@ -12124,6 +12159,13 @@ impl Workspace {
         // Clear a detail sidecar anchored to this tab before the tab disappears.
         self.vertical_tabs_panel
             .clear_detail_sidecar_if_for_pane_group(pane_group.id());
+        // And the emoji picker, if it's open for this tab.
+        if self
+            .tab_emoji_picker_target
+            .is_some_and(|target| target.pane_group_id == pane_group.id())
+        {
+            self.tab_emoji_picker_target = None;
+        }
 
         // If this is the last tab, close the window instead of actually removing
         // the tab.
@@ -12542,6 +12584,9 @@ impl Workspace {
         }
 
         self.activate_tab(insert_index, ctx);
+        // A tab reopened after the float setting changed floats, or not, as
+        // the setting says now.
+        self.sync_tag_floats(ctx);
 
         ctx.notify();
     }
@@ -20267,6 +20312,13 @@ impl Workspace {
         let header_selected = is_collapsed && any_member_active;
 
         let member_kinds = self.compute_group_member_kinds(group.id, ctx);
+        // A group with an unread tab in it shows the tab's dot, so a collapsed
+        // group doesn't hide a finished session.
+        let has_unread_member = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.group_id == Some(group_id))
+            .any(|tab| tab_unread::tab_is_unread(tab.pane_group.as_ref(ctx), ctx));
 
         let is_being_renamed = self
             .current_workspace_state
@@ -20286,23 +20338,28 @@ impl Workspace {
             } else {
                 (8., normal_right_pad)
             };
-            Container::new(
-                Flex::row()
-                    .with_main_axis_size(MainAxisSize::Max)
-                    .with_main_axis_alignment(MainAxisAlignment::Center)
-                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                    .with_spacing(6.)
-                    .with_child(render_group_member_icon_collage(
-                        &member_kinds,
-                        GROUP_ICON_COLLAGE_SIZE,
-                        appearance,
-                    ))
-                    .with_child(Shrinkable::new(1.0, name).finish())
-                    .finish(),
-            )
-            .with_padding_left(left_pad)
-            .with_padding_right(right_pad)
-            .finish()
+            let mut row = Flex::row()
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_main_axis_alignment(MainAxisAlignment::Center)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_spacing(6.)
+                .with_child(render_group_member_icon_collage(
+                    &member_kinds,
+                    GROUP_ICON_COLLAGE_SIZE,
+                    appearance,
+                ))
+                .with_child(Shrinkable::new(1.0, name).finish());
+            if has_unread_member {
+                row.add_child(tab_unread::render_unread_dot(tab_unread::unread_dot_ink(
+                    theme.accent(),
+                    main_text_color,
+                    header_selected,
+                )));
+            }
+            Container::new(row.finish())
+                .with_padding_left(left_pad)
+                .with_padding_right(right_pad)
+                .finish()
         };
         // Overlays the right-justified pin, like a regular tab's close/pin slot.
         let with_pin = |inner: Box<dyn Element>| -> Box<dyn Element> {
@@ -24270,11 +24327,14 @@ impl TypedActionView for Workspace {
             CloseTabsOutsideGroup(group_id) => self.close_tabs_outside_group(*group_id, ctx),
             CloseTabsAboveGroup(group_id) => self.close_tabs_above_group(*group_id, ctx),
             CloseTabsBelowGroup(group_id) => self.close_tabs_below_group(*group_id, ctx),
-            SetTabStarred {
+            SetTabEmoji {
                 pane_group_id,
-                starred,
-            } => self.set_tab_starred(*pane_group_id, *starred, ctx),
-            ToggleActiveTabStar => self.toggle_active_tab_star(ctx),
+                emoji,
+                present,
+            } => self.update_tab_tags(*pane_group_id, ctx, |tags| tags.set(emoji, *present)),
+            ToggleTabEmojiPicker { pane_group_id } => {
+                self.toggle_tab_emoji_picker(*pane_group_id, ctx)
+            }
             SetTabUnread {
                 pane_group_id,
                 terminal_view_id,
@@ -26578,6 +26638,8 @@ impl TypedActionView for Workspace {
             }
         };
         if action.should_save_app_state_on_action() {
+            // A tagged tab that just left its group, say, floats again.
+            self.sync_tag_floats(ctx);
             ctx.dispatch_global_action("workspace:save_app", ());
         }
     }
@@ -27128,6 +27190,27 @@ impl View for Workspace {
                 }
 
                 self.add_move_to_group_sidecar_overlay(&mut stack, app);
+            }
+        }
+
+        // The emoji picker, beside the tab it was opened for, at the spot fixed
+        // as it opened, for as long as that tab is open.
+        if let Some(target) = self.tab_emoji_picker_target {
+            if self.tab_index_of(target.pane_group_id).is_some() {
+                let child_anchor = if target.leftward {
+                    ChildAnchor::TopRight
+                } else {
+                    ChildAnchor::TopLeft
+                };
+                stack.add_positioned_overlay_child(
+                    ChildView::new(&self.tab_emoji_picker).finish(),
+                    OffsetPositioning::offset_from_parent(
+                        target.origin,
+                        ParentOffsetBounds::WindowByPosition,
+                        ParentAnchor::TopLeft,
+                        child_anchor,
+                    ),
+                );
             }
         }
 
@@ -28152,6 +28235,7 @@ impl Workspace {
         let is_right_panel_maximized = pane_group.read(ctx, |pg, _| pg.is_right_panel_maximized);
         let vertical_tabs_panel_open = self.vertical_tabs_panel_open;
         let pinned = tab.pinned;
+        let tags = tab.tags.to_vec();
 
         Some(TransferredTab {
             pane_group,
@@ -28163,6 +28247,7 @@ impl Workspace {
             draggable_state,
             vertical_tabs_panel_open,
             pinned,
+            tags,
         })
     }
 
@@ -28205,10 +28290,10 @@ impl Workspace {
     }
 
     /// Inserts a tab moved in from another window, activates it, and returns
-    /// the index it landed at. With stars on, a starred tab keeps its star and
-    /// lands at the end of the starred block, whatever slot it was dropped on.
-    /// Any other tab lands on its slot, pushed past the starred block and out
-    /// of the middle of a group.
+    /// the index it landed at. It keeps its emoji. With tags on, a floating
+    /// tab keeps floating and lands at the end of the floating block, whatever
+    /// slot it was dropped on. Any other tab lands on its slot, pushed past the
+    /// floating block and out of the middle of a group.
     pub(crate) fn insert_transferred_tab_at_index(
         &mut self,
         transferred_tab: TransferredTab,
@@ -28220,6 +28305,7 @@ impl Workspace {
             color,
             draggable_state,
             pinned,
+            tags,
             ..
         } = transferred_tab;
         ctx.subscribe_to_view(&pane_group, move |me, pane_group, event, ctx| {
@@ -28242,20 +28328,25 @@ impl Workspace {
         tab_data.selected_color = color.map_or(SelectedTabColor::Unset, SelectedTabColor::Color);
         tab_data.draggable_state = draggable_state;
         tab_data.pinned = starred;
+        if starred_tabs::starred_tabs_enabled() {
+            tab_data.tags = tab_tags::TabTags::from_stored(tags);
+        }
         self.tabs.insert(index, tab_data);
         self.activate_tab_internal(index, ctx);
         ctx.notify();
         index
     }
 
-    /// Stars the tab a new window was opened for, when the tab it was moved
-    /// from was starred and stars are on. It's the window's only tab, and so
-    /// the whole of its starred block.
-    fn keep_transferred_star(&mut self, pinned: bool) {
-        if pinned && starred_tabs::starred_tabs_enabled() {
-            if let Some(tab) = self.tabs.last_mut() {
-                tab.pinned = true;
-            }
+    /// Gives the tab a new window was opened for the emoji the tab it was moved
+    /// from wore, and its float, when tags are on. It's the window's only tab,
+    /// and so the whole of its floating block.
+    fn keep_transferred_marks(&mut self, pinned: bool, tags: Vec<String>) {
+        if !starred_tabs::starred_tabs_enabled() {
+            return;
+        }
+        if let Some(tab) = self.tabs.last_mut() {
+            tab.pinned = pinned;
+            tab.tags = tab_tags::TabTags::from_stored(tags);
         }
     }
 
@@ -29536,6 +29627,7 @@ fn render_horizontal_group_pin_indicator(appearance: &Appearance) -> Box<dyn Ele
     starred_tabs::render_pin_slot_mark(
         TAB_PIN_INDICATOR_ICON_SIZE,
         theme.main_text_color(theme.background()),
+        appearance.ui_font_family(),
     )
 }
 

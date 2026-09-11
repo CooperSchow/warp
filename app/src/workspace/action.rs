@@ -257,16 +257,20 @@ pub enum WorkspaceAction {
     PinActiveTabGroup,
     /// Unpins the active tab's group.
     UnpinActiveTabGroup,
-    /// Stars or unstars the tab that owns `pane_group_id`. Carries the tab's
-    /// identity and the target state rather than an index or a toggle, so a
-    /// menu opened before the tabs moved still acts on the tab it was opened
-    /// for.
-    SetTabStarred {
+    /// Puts `emoji` on the tab that owns `pane_group_id` (`present`), or takes
+    /// it off, as a click in the emoji picker does. Carries the tab's identity
+    /// and the target state rather than an index or a toggle, so it acts on
+    /// that tab however the tabs have moved, and repeating it changes nothing.
+    SetTabEmoji {
         pane_group_id: EntityId,
-        starred: bool,
+        emoji: String,
+        present: bool,
     },
-    /// Stars the active tab, or unstars it if it's starred.
-    ToggleActiveTabStar,
+    /// Opens the emoji picker for the tab that owns `pane_group_id`, or closes
+    /// it if it's open for that tab.
+    ToggleTabEmojiPicker {
+        pane_group_id: EntityId,
+    },
     /// Marks the tab that owns `pane_group_id` unread or read: just the pane
     /// showing `terminal_view_id`, or the whole tab when that's `None`.
     SetTabUnread {
@@ -997,8 +1001,7 @@ impl WorkspaceAction {
             | UnpinTabGroup(_)
             | PinActiveTabGroup
             | UnpinActiveTabGroup
-            | SetTabStarred { .. }
-            | ToggleActiveTabStar
+            | SetTabEmoji { .. }
             | SetTabUnread { .. }
             | ToggleActiveTabUnread
             | JumpToNextUnreadTab
@@ -1063,6 +1066,7 @@ impl WorkspaceAction {
             | ToggleSyntaxHighlighting
             | OpenLaunchConfigSaveModal
             | ToggleTabRightClickMenu { .. }
+            | ToggleTabEmojiPicker { .. }
             | ToggleTabSelectionRightClickMenu { .. }
             | ToggleTabGroupRightClickMenu { .. }
             | ToggleVerticalTabsPaneContextMenu { .. }
