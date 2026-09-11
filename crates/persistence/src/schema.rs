@@ -307,6 +307,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    pane_marks (pane_uuid) {
+        pane_uuid -> Binary,
+        starred -> Bool,
+        marked_unread -> Bool,
+    }
+}
+
+diesel::table! {
     pane_nodes (id) {
         id -> Integer,
         tab_id -> Integer,

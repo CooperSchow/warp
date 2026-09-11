@@ -2219,6 +2219,7 @@ fn read_node(conn: &mut SqliteConnection, node: model::PaneNode) -> Result<PaneN
                         conversation_ids_to_restore,
                         active_conversation_id,
                         claude_session_id: terminal_pane.claude_session_id,
+                        marked_unread: false,
                     })
                 }
                 NOTEBOOK_PANE_KIND => {

@@ -14,10 +14,10 @@ use super::schema::{
     code_review_panes, commands, current_user_information, env_var_collection_panes, folders,
     generic_string_objects, ignored_suggestions, mcp_environment_variables,
     mcp_server_installations, mcp_server_panes, notebook_panes, notebooks, object_actions,
-    object_metadata, object_permissions, pane_branches, pane_leaves, pane_nodes, panels,
-    project_rules, projects, server_experiments, settings_panes, tab_groups, tabs, team_members,
-    team_settings, teams, terminal_panes, user_profiles, windows, workflow_panes, workflows,
-    workspace_language_server, workspace_metadata, workspace_teams, workspaces,
+    object_metadata, object_permissions, pane_branches, pane_leaves, pane_marks, pane_nodes,
+    panels, project_rules, projects, server_experiments, settings_panes, tab_groups, tabs,
+    team_members, team_settings, teams, terminal_panes, user_profiles, windows, workflow_panes,
+    workflows, workspace_language_server, workspace_metadata, workspace_teams, workspaces,
 };
 
 #[derive(Insertable)]
@@ -609,6 +609,25 @@ pub struct NewTerminalPane {
     /// The Claude Code session UUID that was running in this pane (if any), so it
     /// can be resumed with `claude --resume <id>` when the tab is restored.
     pub claude_session_id: Option<String>,
+}
+
+/// A terminal pane's marks, keyed by `terminal_panes.uuid`. They live in a
+/// table of their own so a build that doesn't know about them, which rewrites
+/// `tabs` and `terminal_panes` on every save, leaves them alone.
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = pane_marks)]
+pub struct PaneMark {
+    pub pane_uuid: Vec<u8>,
+    pub starred: bool,
+    pub marked_unread: bool,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = pane_marks)]
+pub struct NewPaneMark {
+    pub pane_uuid: Vec<u8>,
+    pub starred: bool,
+    pub marked_unread: bool,
 }
 
 #[derive(Insertable)]

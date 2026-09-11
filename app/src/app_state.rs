@@ -121,6 +121,37 @@ impl PaneNodeSnapshot {
             }
         }
     }
+
+    /// UUIDs of every terminal leaf under this node, in tree order.
+    pub fn terminal_leaf_uuids(&self) -> Vec<&[u8]> {
+        match self {
+            PaneNodeSnapshot::Leaf(LeafSnapshot {
+                contents: LeafContents::Terminal(terminal),
+                ..
+            }) => vec![terminal.uuid.as_slice()],
+            PaneNodeSnapshot::Leaf(_) => vec![],
+            PaneNodeSnapshot::Branch(BranchSnapshot { children, .. }) => children
+                .iter()
+                .flat_map(|(_, child)| child.terminal_leaf_uuids())
+                .collect(),
+        }
+    }
+
+    /// Calls `f` on every terminal leaf under this node, in tree order.
+    pub fn for_each_terminal_leaf_mut(&mut self, f: &mut impl FnMut(&mut TerminalPaneSnapshot)) {
+        match self {
+            PaneNodeSnapshot::Leaf(LeafSnapshot {
+                contents: LeafContents::Terminal(terminal),
+                ..
+            }) => f(terminal),
+            PaneNodeSnapshot::Leaf(_) => {}
+            PaneNodeSnapshot::Branch(BranchSnapshot { children, .. }) => {
+                for (_, child) in children {
+                    child.for_each_terminal_leaf_mut(f);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -222,6 +253,10 @@ pub struct TerminalPaneSnapshot {
     /// The Claude Code session UUID running in this pane at save time (if any),
     /// used to `claude --resume <id>` when the tab is restored on relaunch.
     pub claude_session_id: Option<String>,
+    /// Whether the pane showed the unread dot at save time, from a manual mark
+    /// or an agent result nobody had looked at yet, so the dot survives a
+    /// relaunch.
+    pub marked_unread: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

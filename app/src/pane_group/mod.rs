@@ -2244,6 +2244,7 @@ impl PaneGroup {
                             conversation_ids_to_restore: Vec::new(),
                             active_conversation_id: None,
                             claude_session_id: None,
+                            marked_unread: false,
                         })
                     }
                 };

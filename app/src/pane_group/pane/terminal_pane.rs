@@ -517,6 +517,7 @@ impl PaneContent for TerminalPane {
                 conversation_ids_to_restore: vec![],
                 active_conversation_id: None,
                 claude_session_id: None,
+                marked_unread: false,
             })
         } else if let Some(task_id) = view
             .ambient_agent_view_model()
@@ -548,6 +549,7 @@ impl PaneContent for TerminalPane {
                     conversation_ids_to_restore: vec![],
                     active_conversation_id: None,
                     claude_session_id: None,
+                    marked_unread: false,
                 })
             }
         } else {
@@ -620,6 +622,7 @@ impl PaneContent for TerminalPane {
                 conversation_ids_to_restore,
                 active_conversation_id,
                 claude_session_id,
+                marked_unread: false,
             })
         }
     }

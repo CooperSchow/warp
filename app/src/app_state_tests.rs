@@ -52,6 +52,61 @@ fn test_has_horizontal_split() {
 }
 
 #[test]
+fn terminal_leaf_walkers_visit_only_terminal_leaves_in_tree_order() {
+    let leaf = |contents: LeafContents| {
+        PaneNodeSnapshot::Leaf(LeafSnapshot {
+            is_focused: false,
+            custom_vertical_tabs_title: None,
+            contents,
+        })
+    };
+    let terminal = |uuid: u8| {
+        LeafContents::Terminal(TerminalPaneSnapshot {
+            uuid: vec![uuid],
+            cwd: None,
+            shell_launch_data: None,
+            is_active: false,
+            is_read_only: false,
+            input_config: None,
+            llm_model_override: None,
+            active_profile_id: None,
+            conversation_ids_to_restore: vec![],
+            active_conversation_id: None,
+            claude_session_id: None,
+            marked_unread: false,
+        })
+    };
+    let mut root = PaneNodeSnapshot::Branch(BranchSnapshot {
+        direction: SplitDirection::Horizontal,
+        children: vec![
+            (PaneFlex(1.), leaf(terminal(1))),
+            (
+                PaneFlex(1.),
+                PaneNodeSnapshot::Branch(BranchSnapshot {
+                    direction: SplitDirection::Vertical,
+                    children: vec![
+                        (PaneFlex(1.), leaf(LeafContents::NetworkLog)),
+                        (PaneFlex(1.), leaf(terminal(2))),
+                    ],
+                }),
+            ),
+        ],
+    });
+
+    assert_eq!(
+        root.terminal_leaf_uuids(),
+        vec![[1u8].as_slice(), [2u8].as_slice()]
+    );
+
+    root.for_each_terminal_leaf_mut(&mut |terminal| terminal.marked_unread = true);
+    let mut visited = vec![];
+    root.for_each_terminal_leaf_mut(&mut |terminal| {
+        visited.push((terminal.uuid.clone(), terminal.marked_unread))
+    });
+    assert_eq!(visited, vec![(vec![1], true), (vec![2], true)]);
+}
+
+#[test]
 fn test_code_pane_snapshot_single_tab() {
     let snapshot = CodePaneSnapShot::Local {
         tabs: vec![CodePaneTabSnapshot {
