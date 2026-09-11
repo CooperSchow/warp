@@ -62,10 +62,8 @@ fn main() -> Result<()> {
         }
 
         // Copy the dock tile plugin to the output directory
-        let profile = get_build_profile_name();
-        let target_dir = app_target_dir(&profile).expect("Failed to get app target directory");
         let plugin_src = Path::new("DockTilePlugin/WarpDockTilePlugin.docktileplugin");
-        let plugin_dst = target_dir.join("WarpDockTilePlugin.docktileplugin");
+        let plugin_dst = target_profile_dir().join("WarpDockTilePlugin.docktileplugin");
 
         if !status.success() {
             fs::remove_dir_all(plugin_src).expect("Failed to clean up plugin directory");
@@ -210,15 +208,35 @@ fn generate_channel_config_if_needed(target_family: &str, target_os: &str) {
     }
 }
 
-fn get_build_profile_name() -> String {
-    // The profile name is always the 3rd last part of the path (with 1 based indexing).
-    // e.g. /code/core/target/cli/build/my-build-info-9f91ba6f99d7a061/out
-    env::var("OUT_DIR")
-        .expect("OUT_DIR must be set")
-        .split(std::path::MAIN_SEPARATOR)
-        .nth_back(3)
-        .expect("could not get profile name")
-        .to_string()
+/// `<target-dir>/<profile>`, where `script/macos/bundle` picks up the dock tile
+/// plugin. Cargo doesn't tell build scripts its target dir
+/// (https://github.com/rust-lang/cargo/issues/9661), so this reads it off
+/// `OUT_DIR`, which is `<target-dir>[/<triple>]/<profile>/build/<package>/out`
+/// whether the target dir comes from `CARGO_TARGET_DIR`, `--target-dir` or
+/// `build.target-dir`. The `<triple>` level a `--target` build adds is skipped,
+/// as the bundle script expects.
+fn target_profile_dir() -> PathBuf {
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR must be set"));
+    let profile_dir = out_dir
+        .ancestors()
+        .nth(3)
+        .expect("OUT_DIR should be <target-dir>/<profile>/build/<package>/out");
+    let profile = profile_dir
+        .file_name()
+        .expect("the profile dir should have a name");
+    let mut target_dir = profile_dir
+        .parent()
+        .expect("the profile dir should have a parent");
+    let triple = env::var("TARGET").expect("TARGET must be set");
+    if target_dir
+        .file_name()
+        .is_some_and(|name| name == triple.as_str())
+    {
+        target_dir = target_dir
+            .parent()
+            .expect("the triple dir should have a parent");
+    }
+    target_dir.join(profile)
 }
 
 fn add_features(target_family: &str, target_os: &str) {
