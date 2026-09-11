@@ -110,6 +110,10 @@ pub(super) fn write_pane_marks(
     // Keyed by uuid, so a pane listed twice still gets one row.
     let mut marks: BTreeMap<&[u8], (bool, bool)> = BTreeMap::new();
     for tab in app_state.windows.iter().flat_map(|window| &window.tabs) {
+        // Only an ungrouped tab's star is mirrored. A starred group keeps its
+        // star through ordinary saves, in tab_groups.pinned, but not through
+        // a rollback to a build without stars, whose first save writes that
+        // column false and leaves nothing here to bring the star back.
         let tab_starred = tab.pinned && tab.group_id.is_none();
         for terminal in tab.root.terminal_leaves() {
             let uuid = terminal.uuid.as_slice();
